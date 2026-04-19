@@ -59,6 +59,82 @@ export function DecisionBoundary({ network, dataset, task, numClasses, tick }) {
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.clearRect(0, 0, SIZE, SIZE);
 
+    if (task === 'regression') {
+      const numPoints = GRID_RES;
+      const lineXs = [];
+      const lineInputs = [];
+      for (let j = 0; j < numPoints; j++) {
+        const x0 = (j / (numPoints - 1) - 0.5) * 4.5;
+        lineXs.push(x0);
+        lineInputs.push(new Float32Array([x0, 0]));
+      }
+      const lineOut = network.forward(lineInputs, false);
+
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (let j = 0; j < numPoints; j++) {
+        const value = lineOut[j][0];
+        minY = Math.min(minY, value);
+        maxY = Math.max(maxY, value);
+      }
+      if (dataset) {
+        for (let i = 0; i < dataset.y.length; i++) {
+          minY = Math.min(minY, dataset.y[i]);
+          maxY = Math.max(maxY, dataset.y[i]);
+        }
+      }
+      const pad = Math.max(0.2, (maxY - minY) * 0.1);
+      minY -= pad;
+      maxY += pad;
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = 1;
+      for (let k = 1; k < 4; k++) {
+        const p = (k * SIZE) / 4;
+        ctx.beginPath();
+        ctx.moveTo(p, 0);
+        ctx.lineTo(p, SIZE);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, p);
+        ctx.lineTo(SIZE, p);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = 'rgba(82, 199, 255, 0.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      for (let j = 0; j < numPoints; j++) {
+        const x0 = lineXs[j];
+        const value = lineOut[j][0];
+        const px = (x0 / 4.5 + 0.5) * SIZE;
+        const py = ((maxY - value) / (maxY - minY)) * SIZE;
+        if (j === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+
+      if (!dataset) return;
+      for (let i = 0; i < dataset.X.length; i++) {
+        const x = dataset.X[i][0];
+        const yValue = dataset.y[i];
+        const px = (x / 4.5 + 0.5) * SIZE;
+        const py = ((maxY - yValue) / (maxY - minY)) * SIZE;
+        const t = Math.min(1, Math.max(0, (yValue - minY) / (maxY - minY)));
+        const r = Math.round(82 + t * (255 - 82));
+        const g = Math.round(199 + t * (109 - 199));
+        const b = Math.round(255 + t * (45 - 255));
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.9)`;
+        ctx.strokeStyle = '#d7dee9';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      return;
+    }
+
     const grid = makeGrid(GRID_RES);
     const out = network.forward(grid, false);
     const cell = SIZE / GRID_RES;
@@ -170,8 +246,12 @@ export function NeuronMap({ network, layerIdx, neuronIdx, tick }) {
     canvas.style.height = `${SIZE}px`;
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
 
+    const grid = makeGrid(GRID_RES);
+    network.forward(grid, false);
     const activations = network.activations[layerIdx + 1];
-    if (!activations) return;
+    if (!activations || activations.length < GRID_RES * GRID_RES) return;
+    if (!activations[0] || neuronIdx >= activations[0].length) return;
+
     let min = Infinity;
     let max = -Infinity;
     for (let i = 0; i < activations.length; i++) {

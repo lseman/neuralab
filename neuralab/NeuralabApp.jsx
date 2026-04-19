@@ -818,7 +818,7 @@ export default function NeuralabApp() {
         <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, flexShrink: 0 }}>
 
           {/* Decision boundary panel */}
-          <CanvasPanel icon={Activity} title="Prediction Surface"
+          <CanvasPanel icon={Activity} title={task === 'regression' ? 'Prediction Line' : 'Prediction Surface'}
             right={
               <div className="nl-legend">
                 {task === 'binary' && <>
@@ -837,7 +837,7 @@ export default function NeuralabApp() {
             <DecisionBoundary network={networkRef.current} dataset={trainDataRef.current}
               task={task} numClasses={numClasses} tick={tick} />
             <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 9, color: 'var(--fg-4)' }}>
-              <span>-2.25</span><span>x₀ · x₁</span><span>2.25</span>
+              <span>-2.25</span><span>{task === 'regression' ? 'x₀ → y' : 'x₀ · x₁'}</span><span>2.25</span>
             </div>
           </CanvasPanel>
 

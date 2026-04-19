@@ -764,9 +764,8 @@ function genSine(n = 200, noise = 0.1) {
   const y = [];
   for (let i = 0; i < n; i++) {
     const x0 = (Math.random() - 0.5) * 4;
-    const x1 = (Math.random() - 0.5) * 4;
-    X.push(new Float32Array([x0, x1]));
-    y.push(Math.sin(2 * x0) * Math.cos(1.5 * x1) + randn() * noise);
+    X.push(new Float32Array([x0, 0]));
+    y.push(Math.sin(2 * x0) + randn() * noise);
   }
   return { X, y, classes: 0 };
 }
@@ -776,10 +775,8 @@ function genRipple(n = 200, noise = 0.08) {
   const y = [];
   for (let i = 0; i < n; i++) {
     const x0 = (Math.random() - 0.5) * 4;
-    const x1 = (Math.random() - 0.5) * 4;
-    const r = Math.sqrt(x0 * x0 + x1 * x1);
-    X.push(new Float32Array([x0, x1]));
-    y.push(Math.sin(3 * r) / (1 + 0.4 * r) + randn() * noise);
+    X.push(new Float32Array([x0, 0]));
+    y.push(Math.sin(3 * x0) / (1 + 0.4 * Math.abs(x0)) + randn() * noise);
   }
   return { X, y, classes: 0 };
 }
@@ -789,9 +786,8 @@ function genSaddle(n = 200, noise = 0.08) {
   const y = [];
   for (let i = 0; i < n; i++) {
     const x0 = (Math.random() - 0.5) * 4;
-    const x1 = (Math.random() - 0.5) * 4;
-    X.push(new Float32Array([x0, x1]));
-    y.push(0.4 * x0 * x1 + 0.2 * Math.sin(2 * x0) + randn() * noise);
+    X.push(new Float32Array([x0, 0]));
+    y.push(0.4 * x0 * x0 - 0.3 * x0 + randn() * noise);
   }
   return { X, y, classes: 0 };
 }
@@ -803,9 +799,9 @@ export const DATASETS = {
   xor: { name: 'XOR', fn: genXor, task: 'binary', Icon: GitBranch },
   checker: { name: 'Checker', fn: genChecker, task: 'binary', Icon: Grid3x3 },
   gaussians: { name: '3 Gaussians', fn: genGaussians, task: 'multiclass', Icon: Sparkles },
-  sine: { name: 'Sine Surface', fn: genSine, task: 'regression', Icon: Activity },
-  ripple: { name: 'Ripple Field', fn: genRipple, task: 'regression', Icon: Sparkles },
-  saddle: { name: 'Saddle Surface', fn: genSaddle, task: 'regression', Icon: TrendingUp },
+  sine: { name: 'Sine Wave', fn: genSine, task: 'regression', Icon: Activity },
+  ripple: { name: 'Noisy Sine', fn: genRipple, task: 'regression', Icon: Sparkles },
+  saddle: { name: 'Quadratic Curve', fn: genSaddle, task: 'regression', Icon: TrendingUp },
 };
 
 export const DEFAULT_CONFIG = [
