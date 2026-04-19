@@ -1,0 +1,21 @@
+{
+    "name": "neuralab",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "lucide-react": "^0.498.0",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "reactflow": "^11.9.6",
+        "recharts": "^2.9.0"
+    },
+    "devDependencies": {
+        "@vitejs/plugin-react": "^4.3.1",
+        "vite": "^5.4.0"
+    }
+}
