@@ -135,33 +135,48 @@ function activationColor(value, min, max) {
 }
 
 function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, outputDim, task, tick }) {
-  const denseLayers = useMemo(() => {
-    if (!network) return [];
-    return network.layers.filter(layer => layer.type === 'dense');
-  }, [network]);
-
   const layers = useMemo(() => {
-    const inputCount = Math.max(1, Math.min(network?.inputDim ?? 2, 8));
-    const inputLabel = network?.inputDim === 1 ? 'x₀' : 'x₀, x₁';
+    if (!network) return [];
+    const inputCount = Math.max(1, Math.min(network.inputDim ?? 2, 8));
+    const inputLabel = network.inputDim === 1 ? 'x₀' : 'x₀, x₁';
     const nodes = [{ type: 'input', count: inputCount, label: inputLabel, layerIndex: -1 }];
 
-    denseLayers.forEach((layer, index) => {
-      const isOutput = index === denseLayers.length - 1;
-      nodes.push({
-        type: isOutput ? 'output' : 'dense',
-        count: layer.dout,
-        label: isOutput ? (task === 'regression' ? 'linear' : 'output') : layer.act,
-        weights: layer.W,
-        din: layer.din,
-        dout: layer.dout,
-        neuronIndices: Array.from({ length: layer.dout }, (_, i) => i),
-        layerIndex: index,
-        isOutput,
-      });
+    network.layers.forEach((layer, index) => {
+      if (layer.type === 'dense') {
+        const isOutput = index === network.layers.length - 1;
+        nodes.push({
+          type: isOutput ? 'output' : 'dense',
+          count: layer.dout,
+          label: isOutput ? (task === 'regression' ? 'linear' : 'output') : layer.act,
+          weights: layer.W,
+          din: layer.din,
+          dout: layer.dout,
+          neuronIndices: Array.from({ length: layer.dout }, (_, i) => i),
+          layerIndex: index,
+          isOutput,
+        });
+      } else if (['layernorm', 'batchnorm', 'rmsnorm', 'dropout', 'fourier'].includes(layer.type)) {
+        nodes.push({
+          type: layer.type,
+          count: Number.isFinite(layer.dout) ? layer.dout : layer.din,
+          label:
+            layer.type === 'layernorm' ? 'LayerNorm' :
+            layer.type === 'batchnorm' ? 'BatchNorm' :
+            layer.type === 'rmsnorm' ? 'RMSNorm' :
+            layer.type === 'dropout' ? 'Dropout' :
+            layer.type === 'fourier' ? 'Fourier' : layer.type,
+          weights: layer.W,
+          din: layer.din,
+          dout: layer.dout,
+          neuronIndices: Array.from({ length: Number.isFinite(layer.dout) ? layer.dout : layer.din }, (_, i) => i),
+          layerIndex: index,
+          isOutput: false,
+        });
+      }
     });
 
     return nodes;
-  }, [denseLayers, network, useFourier, numBands, task]);
+  }, [network, task]);
 
   const width = Math.max(372, 116 + Math.max(layers.length - 1, 0) * 90);
   const marginX = 36;
@@ -229,11 +244,7 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
 
     const previewRes = inputDim === 1 ? 18 : 5;
     const previewInputs = makeGrid(previewRes, inputDim);
-    const out = network.forward(previewInputs, false);
-    const denseActivationOffsets = [];
-    network.layers.forEach((layer, index) => {
-      if (layer.type === 'dense') denseActivationOffsets.push(index + 1);
-    });
+    network.forward(previewInputs, false);
 
     columns.forEach((column, columnIndex) => {
       column.nodes.forEach((node, nodeIndex) => {
@@ -241,8 +252,8 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
         if (column.layer.type === 'input') {
           values = previewInputs.map(sample => sample[node.actualIndex] ?? 0);
         } else {
-          const activationIndex = denseActivationOffsets[columnIndex - 1];
-          const activations = column.layer.isOutput ? out : network.activations[activationIndex];
+          const activationIndex = column.layer.layerIndex + 1;
+          const activations = network.activations[activationIndex];
           values = activations?.map(row => row[node.actualIndex] ?? 0) ?? [];
         }
 
@@ -382,7 +393,14 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
               </g>
             ))}
             <text x={column.x} y="18" textAnchor="middle" fontSize="9" fill="rgba(226,232,240,0.86)" fontFamily="JetBrains Mono" letterSpacing="0.16em">
-              {column.layer.type === 'input' ? 'INPUT' : column.layer.type === 'output' ? 'OUTPUT' : `BLOCK ${ci}`}
+              {column.layer.type === 'input' ? 'INPUT'
+                : column.layer.type === 'output' ? 'OUTPUT'
+                : column.layer.type === 'layernorm' ? 'LAYER NORM'
+                : column.layer.type === 'batchnorm' ? 'BATCH NORM'
+                : column.layer.type === 'rmsnorm' ? 'RMS NORM'
+                : column.layer.type === 'dropout' ? 'DROPOUT'
+                : column.layer.type === 'fourier' ? 'FOURIER'
+                : column.layer.type.toUpperCase()}
             </text>
             <text x={column.x} y={height - 10} textAnchor="middle" fontSize="10" fill="rgba(148,163,184,0.82)" fontFamily="JetBrains Mono">
               {column.layer.label}
