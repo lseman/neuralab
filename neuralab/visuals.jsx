@@ -21,7 +21,7 @@ export function DatasetThumb({ type, size = 28 }) {
     const isRegression = DATASETS[type].task === 'regression';
     for (const i in sample.X) {
       const x = sample.X[i][0];
-      const y = sample.X[i][1];
+      const y = sample.X[i].length > 1 ? sample.X[i][1] : 0;
       const px = (x / 4 + 0.5) * size;
       const py = (-y / 4 + 0.5) * size;
       if (isRegression) {
@@ -43,7 +43,7 @@ export function DatasetThumb({ type, size = 28 }) {
   return <canvas ref={canvasRef} />;
 }
 
-export function DecisionBoundary({ network, dataset, task, numClasses, tick }) {
+export function DecisionBoundary({ network, dataset, task, numClasses, tick, inputDim = 2 }) {
   const canvasRef = useRef(null);
   const SIZE = 380;
 
@@ -66,7 +66,10 @@ export function DecisionBoundary({ network, dataset, task, numClasses, tick }) {
       for (let j = 0; j < numPoints; j++) {
         const x0 = (j / (numPoints - 1) - 0.5) * 4.5;
         lineXs.push(x0);
-        lineInputs.push(new Float32Array([x0, 0]));
+        const sample = new Float32Array(inputDim);
+        sample[0] = x0;
+        if (inputDim > 1) sample[1] = 0;
+        lineInputs.push(sample);
       }
       const lineOut = network.forward(lineInputs, false);
 
@@ -135,14 +138,17 @@ export function DecisionBoundary({ network, dataset, task, numClasses, tick }) {
       return;
     }
 
-    const grid = makeGrid(GRID_RES);
+    const grid = makeGrid(GRID_RES, inputDim);
     const out = network.forward(grid, false);
     const cell = SIZE / GRID_RES;
+
+    if (!out || out.length < GRID_RES * GRID_RES) return;
 
     for (let i = 0; i < GRID_RES; i++) {
       for (let j = 0; j < GRID_RES; j++) {
         const index = i * GRID_RES + j;
         const o = out[index];
+        if (!o) continue;
         let r;
         let g;
         let b;
@@ -205,7 +211,7 @@ export function DecisionBoundary({ network, dataset, task, numClasses, tick }) {
     if (!dataset) return;
     for (let i = 0; i < dataset.X.length; i++) {
       const x = dataset.X[i][0];
-      const y = dataset.X[i][1];
+      const y = dataset.X[i].length > 1 ? dataset.X[i][1] : 0;
       const px = (x / 4.5 + 0.5) * SIZE;
       const py = (-y / 4.5 + 0.5) * SIZE;
       if (task === 'binary') {
@@ -226,7 +232,7 @@ export function DecisionBoundary({ network, dataset, task, numClasses, tick }) {
       ctx.fill();
       ctx.stroke();
     }
-  }, [dataset, network, numClasses, task, tick]);
+  }, [dataset, network, numClasses, task, tick, inputDim]);
 
   return <canvas ref={canvasRef} style={{ display: 'block', width: '100%', maxWidth: SIZE, borderRadius: 6 }} />;
 }
@@ -245,11 +251,13 @@ export function NeuronMap({ network, layerIdx, neuronIdx, tick }) {
     canvas.style.width = `${SIZE}px`;
     canvas.style.height = `${SIZE}px`;
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, SIZE, SIZE);
 
-    const grid = makeGrid(GRID_RES);
+    const inputDim = network.inputDim ?? 2;
+    const grid = makeGrid(GRID_RES, inputDim);
     network.forward(grid, false);
     const activations = network.activations[layerIdx + 1];
-    if (!activations || activations.length < GRID_RES * GRID_RES) return;
+    if (!activations || activations.length === 0) return;
     if (!activations[0] || neuronIdx >= activations[0].length) return;
 
     let min = Infinity;
@@ -260,6 +268,41 @@ export function NeuronMap({ network, layerIdx, neuronIdx, tick }) {
       if (value > max) max = value;
     }
     const range = Math.max(1e-6, max - min);
+
+    if (inputDim === 1) {
+      const cellW = SIZE / Math.max(activations.length, 1);
+      for (let i = 0; i < activations.length; i++) {
+        const value = activations[i][neuronIdx];
+        const t = (value - min) / range;
+        const r = Math.round(82 + t * (255 - 82));
+        const g = Math.round(199 + t * (109 - 199));
+        const b = Math.round(255 + t * (45 - 255));
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        ctx.fillRect(i * cellW, 0, cellW + 0.5, SIZE);
+      }
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      for (let i = 0; i < activations.length; i++) {
+        const value = activations[i][neuronIdx];
+        const x = i * cellW + cellW / 2;
+        const y = SIZE - 6 - ((value - min) / range) * (SIZE - 12);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, SIZE / 2);
+      ctx.lineTo(SIZE, SIZE / 2);
+      ctx.stroke();
+      return;
+    }
+
+    if (activations.length < GRID_RES * GRID_RES) return;
     const cell = SIZE / GRID_RES;
     for (let i = 0; i < GRID_RES; i++) {
       for (let j = 0; j < GRID_RES; j++) {

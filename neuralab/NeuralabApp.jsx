@@ -37,7 +37,7 @@ import {
   softmaxCELoss,
 } from './core.js';
 import { STYLES } from './styles.js';
-import { DatasetThumb, DecisionBoundary, GradFlowBars, NeuronMap } from './visuals.jsx';
+import { DatasetThumb, DecisionBoundary, GradFlowBars } from './visuals.jsx';
 
 // ── Node color by layer type ──────────────────────────────────────────────
 const NODE_COLORS = {
@@ -125,6 +125,282 @@ function CanvasPanel({ icon: Icon, title, right, children }) {
   );
 }
 
+function activationColor(value, min, max) {
+  const range = Math.max(1e-6, max - min);
+  const t = (value - min) / range;
+  const r = Math.round(82 + t * (255 - 82));
+  const g = Math.round(199 + t * (109 - 199));
+  const b = Math.round(255 + t * (45 - 255));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, outputDim, task, tick }) {
+  const denseLayers = useMemo(() => {
+    if (!network) return [];
+    return network.layers.filter(layer => layer.type === 'dense');
+  }, [network]);
+
+  const layers = useMemo(() => {
+    const inputCount = Math.max(1, Math.min(network?.inputDim ?? 2, 8));
+    const inputLabel = network?.inputDim === 1 ? 'x₀' : 'x₀, x₁';
+    const nodes = [{ type: 'input', count: inputCount, label: inputLabel, layerIndex: -1 }];
+
+    denseLayers.forEach((layer, index) => {
+      const isOutput = index === denseLayers.length - 1;
+      nodes.push({
+        type: isOutput ? 'output' : 'dense',
+        count: layer.dout,
+        label: isOutput ? (task === 'regression' ? 'linear' : 'output') : layer.act,
+        weights: layer.W,
+        din: layer.din,
+        dout: layer.dout,
+        neuronIndices: Array.from({ length: layer.dout }, (_, i) => i),
+        layerIndex: index,
+        isOutput,
+      });
+    });
+
+    return nodes;
+  }, [denseLayers, network, useFourier, numBands, task]);
+
+  const width = Math.max(372, 116 + Math.max(layers.length - 1, 0) * 90);
+  const marginX = 36;
+  const marginY = 38;
+  const cardWidth = 26;
+  const cardHeight = 26;
+  const cardGap = 10;
+  const inputDim = network?.inputDim ?? 2;
+  const maxCount = Math.max(1, ...layers.map(layer => Number.isFinite(layer.count) ? layer.count : 1));
+  const height = Math.max(228, marginY * 2 + maxCount * cardHeight + Math.max(0, maxCount - 1) * cardGap);
+
+  const columns = useMemo(() => layers.map((layer, li) => {
+    const rawCount = Number.isFinite(layer.count) ? layer.count : 1;
+    const count = Math.max(1, rawCount);
+    const x = marginX + li * ((width - marginX * 2) / Math.max(layers.length - 1, 1));
+    const contentHeight = count * cardHeight + Math.max(0, count - 1) * cardGap;
+    const topOffset = (height - contentHeight) / 2;
+    return {
+      layer,
+      x,
+      nodes: Array.from({ length: count }).map((_, ni) => ({
+        cx: x,
+        cy: topOffset + cardHeight / 2 + ni * (cardHeight + cardGap),
+        actualIndex: layer.type === 'input' ? ni : (layer.neuronIndices?.[ni] ?? ni),
+        label: null,
+      })),
+    };
+  }), [cardGap, cardHeight, height, layers, marginX]);
+
+  const edges = useMemo(() => {
+    const nextEdges = [];
+    for (let li = 0; li < columns.length - 1; li++) {
+      const src = columns[li];
+      const dst = columns[li + 1];
+      const weights = dst.layer.weights;
+      let maxWeight = 1;
+      if (weights) {
+        for (let a = 0; a < Math.min(src.nodes.length, weights.length); a++) {
+          for (let b = 0; b < Math.min(dst.nodes.length, weights[0].length); b++) {
+            maxWeight = Math.max(maxWeight, Math.abs(weights[a][b]));
+          }
+        }
+      }
+      for (let a = 0; a < src.nodes.length; a++) {
+        for (let b = 0; b < dst.nodes.length; b++) {
+          const weight = weights?.[a]?.[b] ?? 0;
+          const strength = weights ? Math.min(1, Math.abs(weight) / maxWeight) : 0.12;
+          nextEdges.push({
+            from: src.nodes[a],
+            to: dst.nodes[b],
+            width: 0.7 + 0.9 * strength,
+            color: dst.layer.type === 'output'
+              ? `rgba(249,115,22,${0.14 + 0.22 * strength})`
+              : `rgba(148,163,184,${0.12 + 0.18 * strength})`,
+          });
+        }
+      }
+    }
+    return nextEdges;
+  }, [columns]);
+
+  const previewData = useMemo(() => {
+    const previews = {};
+    if (!network) return previews;
+
+    const previewRes = inputDim === 1 ? 18 : 5;
+    const previewInputs = makeGrid(previewRes, inputDim);
+    const out = network.forward(previewInputs, false);
+    const denseActivationOffsets = [];
+    network.layers.forEach((layer, index) => {
+      if (layer.type === 'dense') denseActivationOffsets.push(index + 1);
+    });
+
+    columns.forEach((column, columnIndex) => {
+      column.nodes.forEach((node, nodeIndex) => {
+        let values;
+        if (column.layer.type === 'input') {
+          values = previewInputs.map(sample => sample[node.actualIndex] ?? 0);
+        } else {
+          const activationIndex = denseActivationOffsets[columnIndex - 1];
+          const activations = column.layer.isOutput ? out : network.activations[activationIndex];
+          values = activations?.map(row => row[node.actualIndex] ?? 0) ?? [];
+        }
+
+        let min = Infinity;
+        let max = -Infinity;
+        for (const value of values) {
+          if (value < min) min = value;
+          if (value > max) max = value;
+        }
+        if (!values.length) {
+          min = 0;
+          max = 1;
+        }
+        previews[`${columnIndex}-${nodeIndex}`] = { values, min, max, previewRes };
+      });
+    });
+
+    return previews;
+  }, [columns, inputDim, network, tick]);
+
+  return (
+    <div className="nl-network-diagram">
+      <div className="nl-network-svg-wrap">
+        <div className="nl-network-stage" style={{ width }}>
+          <div className="nl-network-toolbar">
+            {columns.map((column, ci) => (
+              <div
+                key={ci}
+                className="nl-network-layer-control"
+                style={{ left: column.x, transform: 'translateX(-50%)' }}
+              >
+                {column.layer.type === 'dense' && !column.layer.isOutput ? (
+                  <div className="nl-layer-spin">
+                    <button
+                      type="button"
+                      className="nl-btn mini"
+                      onClick={() => updateLayer(column.layer.layerIndex, { units: Math.max(1, column.layer.dout - 1) })}
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      className="nl-btn mini"
+                      onClick={() => updateLayer(column.layer.layerIndex, { units: column.layer.dout + 1 })}
+                    >
+                      +
+                    </button>
+                  </div>
+                ) : <div className="nl-layer-spacer" />}
+              </div>
+            ))}
+          </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="nl-network-svg" style={{ width, height }}>
+        {edges.map((edge, index) => (
+          <path
+            key={index}
+            d={`M ${edge.from.cx} ${edge.from.cy} C ${edge.from.cx + (edge.to.cx - edge.from.cx) * 0.42} ${edge.from.cy}, ${edge.to.cx - (edge.to.cx - edge.from.cx) * 0.34} ${edge.to.cy}, ${edge.to.cx} ${edge.to.cy}`}
+            stroke={edge.color}
+            strokeWidth={edge.width}
+            strokeLinecap="round"
+            fill="none"
+          />
+        ))}
+        {columns.map((column, ci) => (
+          <g key={ci}>
+            <line
+              x1={column.x}
+              y1="24"
+              x2={column.x}
+              y2={height - 24}
+              stroke="rgba(255,255,255,0.08)"
+              strokeDasharray="3 8"
+            />
+            {column.nodes.map((node, ni) => (
+              <g key={ni}>
+                <rect
+                  x={node.cx - cardWidth / 2}
+                  y={node.cy - cardHeight / 2}
+                  width={cardWidth}
+                  height={cardHeight}
+                  rx="7"
+                  fill="rgba(255,255,255,0.04)"
+                  stroke={column.layer.type === 'output' ? 'rgba(249,115,22,0.65)' : column.layer.type === 'input' ? 'rgba(20,184,166,0.65)' : 'rgba(59,130,246,0.55)'}
+                  strokeWidth="1"
+                />
+                {inputDim === 1 ? (
+                  <>
+                    <line
+                      x1={node.cx - cardWidth / 2 + 4}
+                      y1={node.cy}
+                      x2={node.cx + cardWidth / 2 - 4}
+                      y2={node.cy}
+                      stroke="rgba(255,255,255,0.12)"
+                      strokeWidth="1"
+                    />
+                    <path
+                      d={(previewData[`${ci}-${ni}`]?.values ?? []).map((value, index, arr) => {
+                        const min = previewData[`${ci}-${ni}`]?.min ?? 0;
+                        const max = previewData[`${ci}-${ni}`]?.max ?? 1;
+                        const x = node.cx - cardWidth / 2 + 4 + (index / Math.max(arr.length - 1, 1)) * (cardWidth - 8);
+                        const y = node.cy + cardHeight / 2 - 4 - ((value - min) / Math.max(max - min, 1e-6)) * (cardHeight - 8);
+                        return `${index === 0 ? 'M' : 'L'} ${x} ${y}`;
+                      }).join(' ')}
+                      fill="none"
+                      stroke={column.layer.type === 'output' ? '#f97316' : column.layer.type === 'input' ? '#14b8a6' : '#60a5fa'}
+                      strokeWidth="1.2"
+                      strokeLinecap="round"
+                    />
+                  </>
+                ) : (
+                  (() => {
+                    const preview = previewData[`${ci}-${ni}`];
+                    if (!preview) return null;
+                    const cells = [];
+                    const innerPad = 4;
+                    const cell = (cardWidth - innerPad * 2) / Math.max(preview.previewRes, 1);
+                    const values = preview.values ?? [];
+                    for (let row = 0; row < preview.previewRes; row++) {
+                      for (let col = 0; col < preview.previewRes; col++) {
+                        const value = values[row * preview.previewRes + col] ?? preview.min ?? 0;
+                        cells.push(
+                          <rect
+                            key={`${row}-${col}`}
+                            x={node.cx - cardWidth / 2 + innerPad + col * cell}
+                            y={node.cy - cardHeight / 2 + innerPad + row * cell}
+                            width={cell + 0.4}
+                            height={cell + 0.4}
+                            fill={activationColor(value, preview.min, preview.max)}
+                            opacity="0.94"
+                          />,
+                        );
+                      }
+                    }
+                    return cells;
+                  })()
+                )}
+              </g>
+            ))}
+            <text x={column.x} y="18" textAnchor="middle" fontSize="9" fill="rgba(226,232,240,0.86)" fontFamily="JetBrains Mono" letterSpacing="0.16em">
+              {column.layer.type === 'input' ? 'INPUT' : column.layer.type === 'output' ? 'OUTPUT' : `BLOCK ${ci}`}
+            </text>
+            <text x={column.x} y={height - 10} textAnchor="middle" fontSize="10" fill="rgba(148,163,184,0.82)" fontFamily="JetBrains Mono">
+              {column.layer.label}
+            </text>
+            {column.nodes.map((node, ni) => node.label ? (
+              <text key={`label-${ni}`} x={node.cx} y={node.cy + 3} textAnchor="middle" fontSize="8" fill="rgba(241,245,249,0.92)" fontFamily="JetBrains Mono">
+                {node.label}
+              </text>
+            ) : null)}
+          </g>
+        ))}
+      </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main app ──────────────────────────────────────────────────────────────
 export default function NeuralabApp() {
   const [datasetName, setDatasetName] = useState('spiral');
@@ -167,10 +443,11 @@ export default function NeuralabApp() {
   const selectedNode = useMemo(() => {
     if (!selectedNodeId) return null;
     if (selectedNodeId === 'input') {
+      const inputLabel = task === 'regression' ? 'x₀' : 'x₀ x₁';
       return {
         nodeType: 'input',
         title: 'Input',
-        subtitle: useFourier ? `Fourier ×${numBands}` : 'x₀ x₁',
+        subtitle: useFourier ? `Fourier ×${numBands}` : inputLabel,
         config: { useFourier, numBands },
       };
     }
@@ -224,14 +501,15 @@ export default function NeuralabApp() {
 
   // ── Network ──────────────────────────────────────────────────────────────
   const rebuildNetwork = useCallback(() => {
-    networkRef.current = createNetwork(configRef.current, 2, outputDim, useFourier, numBands);
+    const inputDim = task === 'regression' ? 1 : 2;
+    networkRef.current = createNetwork(configRef.current, inputDim, outputDim, useFourier, numBands);
     stepRef.current = 0;
     setStep(0);
     setLossHistory([]);
     lossBufferRef.current = [];
-    networkRef.current.forward(makeGrid(), false);
+    networkRef.current.forward(makeGrid(inputDim), false);
     setTick(v => v + 1);
-  }, [numBands, outputDim, useFourier]);
+  }, [numBands, outputDim, useFourier, task]);
 
   useEffect(() => { rebuildNetwork(); }, [config, rebuildNetwork]);
 
@@ -293,7 +571,7 @@ export default function NeuralabApp() {
       return { loss: loss / data.X.length, acc: task === 'regression' ? 0 : correct / data.X.length };
     };
     const tr = evalSet(train), te = evalSet(test);
-    net.forward(makeGrid(), false);
+    net.forward(makeGrid(net.inputDim ?? 2), false);
     let dead = 0, total = 0;
     for (let li = 0; li < net.layers.length - 1; li++) {
       const L = net.layers[li];
@@ -386,9 +664,10 @@ export default function NeuralabApp() {
   const gradNorms   = hiddenLayers.map(L => L.gradNorm());
   const weightNorms = hiddenLayers.map(L => L.weightNorm());
   const totalParams = allLayers.reduce((s, L) => L.type === 'dense' ? s + L.din * L.dout + L.dout : s, 0);
+  const inputDim = networkRef.current?.inputDim ?? 2;
   const pyCode = useMemo(
-    () => exportPyTorch(config, 2, task, numClasses, useFourier, numBands, optimizer, baseLr, weightDecay),
-    [baseLr, config, numBands, numClasses, optimizer, task, useFourier, weightDecay],
+    () => exportPyTorch(config, inputDim, task, numClasses, useFourier, numBands, optimizer, baseLr, weightDecay),
+    [baseLr, config, inputDim, numBands, numClasses, optimizer, task, useFourier, weightDecay],
   );
 
   return (
@@ -465,7 +744,7 @@ export default function NeuralabApp() {
                 <div className="nl-arch-block-dot" style={{ background: 'var(--node-teal)' }} />
                 <div className="nl-arch-block-body">
                   <span className="nl-arch-block-title">Input</span>
-                  <span className="nl-arch-block-meta">{useFourier ? `Fourier ×${numBands}` : 'x₀ · x₁'}</span>
+                  <span className="nl-arch-block-meta">{useFourier ? `Fourier ×${numBands}` : task === 'regression' ? 'x₀' : 'x₀ · x₁'}</span>
                 </div>
                 <span className="nl-arch-block-tag">in</span>
               </div>
@@ -811,7 +1090,7 @@ export default function NeuralabApp() {
       {/* ── CANVAS CENTER ───────────────────────────────────────────────── */}
       <main className="nl-canvas nl-scroll" style={{ overflowY: 'auto', paddingBottom: 36 }}>
 
-        {/* Top row: decision surface + neuron fields */}
+        {/* Top row: prediction + network graph */}
         <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, flexShrink: 0 }}>
 
           {/* Decision boundary panel */}
@@ -832,45 +1111,20 @@ export default function NeuralabApp() {
             }
           >
             <DecisionBoundary network={networkRef.current} dataset={trainDataRef.current}
-              task={task} numClasses={numClasses} tick={tick} />
+              task={task} numClasses={numClasses} tick={tick} inputDim={networkRef.current?.inputDim ?? 2} />
             <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 9, color: 'var(--fg-4)' }}>
               <span>-2.25</span><span>{task === 'regression' ? 'x₀ → y' : 'x₀ · x₁'}</span><span>2.25</span>
             </div>
           </CanvasPanel>
 
-          {/* Neuron activation fields */}
-          <CanvasPanel icon={Eye} title="Neuron Fields">
-            <div className="nl-scroll" style={{ overflowX: 'auto' }}>
-              <div style={{ display: 'flex', gap: 14, minWidth: 'max-content' }}>
-                {allLayers.map((L, li) => {
-                  if (L.type !== 'dense') return null;
-                  const isOutput = li === allLayers.length - 1;
-                  return (
-                    <div key={li} style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                      <div className="mono" style={{
-                        fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.06em',
-                        color: isOutput ? 'var(--node-orange)' : 'var(--node-teal)',
-                      }}>
-                        {isOutput ? 'output' : `L${li + 1}`} · {L.dout}u
-                      </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: L.dout > 8 ? '1fr 1fr' : '1fr', gap: 2 }}>
-                        {Array.from({ length: L.dout }).map((_, ni) => (
-                          <NeuronMap key={ni} network={networkRef.current} layerIdx={li} neuronIdx={ni} tick={tick} />
-                        ))}
-                      </div>
-                      {!isOutput && (
-                        <div className="mono" style={{ fontSize: 8, color: 'var(--fg-4)', textAlign: 'center' }}>{L.act}</div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+          <CanvasPanel icon={Layers} title="Network Graph">
+            <NetworkDiagram network={networkRef.current} config={config} updateLayer={updateLayer} useFourier={useFourier}
+              numBands={numBands} outputDim={outputDim} task={task} tick={tick} />
           </CanvasPanel>
         </div>
 
         {/* Bottom row: loss curve + gradient flow */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 10, flexShrink: 0 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 10, marginTop: 10, flexShrink: 0 }}>
 
           {/* Loss curve */}
           <CanvasPanel icon={Activity} title="Loss Curve"

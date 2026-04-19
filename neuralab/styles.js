@@ -658,6 +658,64 @@ body { background: transparent; }
   padding: 0 12px;
 }
 
+.nl-network-diagram {
+  width: 100%;
+  min-height: 248px;
+  border-radius: 20px;
+  background: transparent;
+  border: 0;
+  padding: 8px 8px 10px;
+  box-shadow: none;
+}
+
+.nl-network-stage {
+  position: relative;
+  margin: 0 auto;
+}
+
+.nl-network-toolbar {
+  position: relative;
+  height: 28px;
+  margin-bottom: 6px;
+}
+
+.nl-network-layer-control {
+  position: absolute;
+  top: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.nl-layer-spin {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.nl-btn.mini {
+  min-width: 26px;
+  padding: 0 6px;
+  height: 24px;
+  font-size: 11px;
+  border-radius: 999px;
+  background: var(--chrome-3);
+}
+
+.nl-layer-spacer {
+  width: 28px;
+}
+
+.nl-network-svg-wrap {
+  width: 100%;
+  overflow: auto;
+  padding-bottom: 4px;
+}
+
+.nl-network-svg {
+  display: block;
+  max-width: none;
+  margin: 0;
+}
+
 .nl-block-fallback {
   display: grid;
   gap: 8px;

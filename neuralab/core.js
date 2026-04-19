@@ -241,7 +241,7 @@ export class DropoutLayer {
     });
   }
 
-  zeroGrad() {}
+  zeroGrad() { }
   gradNorm() { return 0; }
   weightNorm() { return 0; }
 }
@@ -502,7 +502,7 @@ export class FourierFeaturesLayer {
   }
 
   backward(dOut) { return dOut; }
-  zeroGrad() {}
+  zeroGrad() { }
   gradNorm() { return 0; }
   weightNorm() { return 0; }
 }
@@ -764,7 +764,7 @@ function genSine(n = 200, noise = 0.1) {
   const y = [];
   for (let i = 0; i < n; i++) {
     const x0 = (Math.random() - 0.5) * 4;
-    X.push(new Float32Array([x0, 0]));
+    X.push(new Float32Array([x0]));
     y.push(Math.sin(2 * x0) + randn() * noise);
   }
   return { X, y, classes: 0 };
@@ -775,7 +775,7 @@ function genRipple(n = 200, noise = 0.08) {
   const y = [];
   for (let i = 0; i < n; i++) {
     const x0 = (Math.random() - 0.5) * 4;
-    X.push(new Float32Array([x0, 0]));
+    X.push(new Float32Array([x0]));
     y.push(Math.sin(3 * x0) / (1 + 0.4 * Math.abs(x0)) + randn() * noise);
   }
   return { X, y, classes: 0 };
@@ -786,7 +786,7 @@ function genSaddle(n = 200, noise = 0.08) {
   const y = [];
   for (let i = 0; i < n; i++) {
     const x0 = (Math.random() - 0.5) * 4;
-    X.push(new Float32Array([x0, 0]));
+    X.push(new Float32Array([x0]));
     y.push(0.4 * x0 * x0 - 0.3 * x0 + randn() * noise);
   }
   return { X, y, classes: 0 };
@@ -809,8 +809,16 @@ export const DEFAULT_CONFIG = [
   { type: 'dense', units: 8, activation: 'tanh', residual: false },
 ];
 
-export function makeGrid(res = GRID_RES) {
+export function makeGrid(res = GRID_RES, inputDim = 2) {
   const X = [];
+  if (inputDim === 1) {
+    for (let i = 0; i < res; i++) {
+      const x0 = (i / (res - 1) - 0.5) * 4.5;
+      X.push(new Float32Array([x0]));
+    }
+    return X;
+  }
+
   for (let i = 0; i < res; i++) {
     for (let j = 0; j < res; j++) {
       const x0 = (j / (res - 1) - 0.5) * 4.5;
@@ -844,7 +852,9 @@ export function createNetwork(config, inputDim, outputDim, useFourier, numBands)
     }
   }
   layers.push(new DenseLayer(din, outputDim, 'linear', false));
-  return new Network(layers);
+  const network = new Network(layers);
+  network.inputDim = inputDim;
+  return network;
 }
 
 export function exportPyTorch(config, inputDim, task, numClasses, useFourier, numBands, optName, lr, wd) {
