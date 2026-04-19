@@ -612,14 +612,11 @@ export default function NeuralabApp() {
             <div className="nl-stack">
               <div>
                 <span className="nl-label" style={{ display: 'block', marginBottom: 6 }}>Algorithm</span>
-                <div className="nl-opt-pills">
+                <select className="nl-select mono" value={optimizer} onChange={e => setOptimizer(e.target.value)}>
                   {OPTIMIZER_OPTIONS.map(o => (
-                    <button key={o.value} className={`nl-opt-pill${optimizer === o.value ? ' active' : ''}`}
-                      onClick={() => setOptimizer(o.value)}>
-                      {o.value}
-                    </button>
+                    <option key={o.value} value={o.value}>{o.label || o.value}</option>
                   ))}
-                </div>
+                </select>
                 {optimizerMeta?.detail && (
                   <div style={{ marginTop: 6, fontSize: 10, color: 'var(--fg-4)', lineHeight: 1.5 }}>
                     {optimizerMeta.detail}
