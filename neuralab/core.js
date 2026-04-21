@@ -121,6 +121,72 @@ export const SCHEDULER_OPTIONS = [
   { value: 'warmup_cosine', label: 'Warmup + cosine' },
 ];
 
+export const LAB_PRESETS = [
+  {
+    id: 'spiral-explorer',
+    name: 'Spiral Explorer',
+    description: 'Balanced default for binary decision boundaries',
+    dataset: 'spiral',
+    noise: 0.08,
+    numSamples: 240,
+    config: [
+      { type: 'dense', units: 12, activation: 'tanh', residual: false },
+      { type: 'dense', units: 12, activation: 'tanh', residual: false },
+    ],
+    useFourier: false,
+    numBands: 4,
+    optimizer: 'adam',
+    baseLr: 0.02,
+    weightDecay: 0,
+    scheduler: 'cosine',
+    batchSize: 32,
+    speed: 2,
+  },
+  {
+    id: 'spectral-wave',
+    name: 'Spectral Wave',
+    description: 'Fourier features for harder periodic fits',
+    dataset: 'ripple',
+    noise: 0.05,
+    numSamples: 220,
+    config: [
+      { type: 'dense', units: 18, activation: 'silu', residual: false },
+      { type: 'layernorm' },
+      { type: 'dense', units: 18, activation: 'silu', residual: false },
+    ],
+    useFourier: true,
+    numBands: 5,
+    optimizer: 'adamw',
+    baseLr: 0.01,
+    weightDecay: 0.0001,
+    scheduler: 'warmup_cosine',
+    batchSize: 24,
+    speed: 2,
+  },
+  {
+    id: 'regularized-stack',
+    name: 'Regularized Stack',
+    description: 'Deeper layout with dropout and normalization',
+    dataset: 'pinwheel',
+    noise: 0.18,
+    numSamples: 300,
+    config: [
+      { type: 'dense', units: 24, activation: 'gelu', residual: false },
+      { type: 'batchnorm' },
+      { type: 'dropout', rate: 0.15 },
+      { type: 'resblock', units: 24, activation: 'gelu' },
+    ],
+    useFourier: false,
+    numBands: 4,
+    optimizer: 'adamw',
+    baseLr: 0.008,
+    weightDecay: 0.0005,
+    scheduler: 'warmup_cosine',
+    batchSize: 48,
+    speed: 3,
+  },
+];
+
 export class DenseLayer {
   constructor(din, dout, act = 'relu', residual = false) {
     this.type = 'dense';
@@ -244,6 +310,251 @@ export class DropoutLayer {
   zeroGrad() { }
   gradNorm() { return 0; }
   weightNorm() { return 0; }
+}
+
+export class Conv1DLayer {
+  constructor(inChannels, seqLen, outChannels = 4, kernelSize = 3, act = 'relu') {
+    this.type = 'conv1d';
+    this.inChannels = inChannels;
+    this.seqLen = seqLen;
+    this.outChannels = outChannels;
+    this.kernelSize = kernelSize;
+    this.act = act;
+    this.padding = Math.floor(kernelSize / 2);
+    this.din = inChannels * seqLen;
+    this.dout = outChannels * seqLen;
+    const reluish = ['relu', 'leaky_relu', 'gelu', 'silu', 'elu'].includes(act);
+    const scale = reluish ? Math.sqrt(2 / (inChannels * kernelSize)) : Math.sqrt(1 / (inChannels * kernelSize));
+    this.W = Array.from({ length: outChannels }, () =>
+      Array.from({ length: inChannels }, () => {
+        const kernel = new Float32Array(kernelSize);
+        for (let k = 0; k < kernelSize; k++) kernel[k] = randn() * scale;
+        return kernel;
+      }),
+    );
+    this.b = new Float32Array(outChannels);
+    this.dW = Array.from({ length: outChannels }, () => Array.from({ length: inChannels }, () => new Float32Array(kernelSize)));
+    this.db = new Float32Array(outChannels);
+    this.mW = Array.from({ length: outChannels }, () => Array.from({ length: inChannels }, () => new Float32Array(kernelSize)));
+    this.vW = Array.from({ length: outChannels }, () => Array.from({ length: inChannels }, () => new Float32Array(kernelSize)));
+    this.mb = new Float32Array(outChannels);
+    this.vb = new Float32Array(outChannels);
+  }
+
+  forward(X) {
+    const batch = X.length;
+    this.X = X;
+    this.pre = Array.from({ length: batch }, () => new Float32Array(this.dout));
+    this.post = Array.from({ length: batch }, () => new Float32Array(this.dout));
+    for (let i = 0; i < batch; i++) {
+      const xi = X[i];
+      for (let oc = 0; oc < this.outChannels; oc++) {
+        for (let pos = 0; pos < this.seqLen; pos++) {
+          let sum = this.b[oc];
+          for (let ic = 0; ic < this.inChannels; ic++) {
+            const channelOffset = ic * this.seqLen;
+            const kernel = this.W[oc][ic];
+            for (let k = 0; k < this.kernelSize; k++) {
+              const src = pos + k - this.padding;
+              if (src < 0 || src >= this.seqLen) continue;
+              sum += xi[channelOffset + src] * kernel[k];
+            }
+          }
+          const flat = oc * this.seqLen + pos;
+          this.pre[i][flat] = sum;
+          this.post[i][flat] = ACT[this.act].f(sum);
+        }
+      }
+    }
+    return this.post;
+  }
+
+  backward(dOut) {
+    const batch = dOut.length;
+    const dPre = Array.from({ length: batch }, () => new Float32Array(this.dout));
+    const dX = Array.from({ length: batch }, () => new Float32Array(this.din));
+    for (let i = 0; i < batch; i++) {
+      for (let oc = 0; oc < this.outChannels; oc++) {
+        for (let pos = 0; pos < this.seqLen; pos++) {
+          const flat = oc * this.seqLen + pos;
+          dPre[i][flat] = dOut[i][flat] * ACT[this.act].df(this.pre[i][flat], this.post[i][flat]);
+        }
+      }
+    }
+    for (let i = 0; i < batch; i++) {
+      const xi = this.X[i];
+      for (let oc = 0; oc < this.outChannels; oc++) {
+        for (let pos = 0; pos < this.seqLen; pos++) {
+          const grad = dPre[i][oc * this.seqLen + pos];
+          this.db[oc] += grad;
+          for (let ic = 0; ic < this.inChannels; ic++) {
+            const channelOffset = ic * this.seqLen;
+            const kernelGrad = this.dW[oc][ic];
+            const kernel = this.W[oc][ic];
+            for (let k = 0; k < this.kernelSize; k++) {
+              const src = pos + k - this.padding;
+              if (src < 0 || src >= this.seqLen) continue;
+              kernelGrad[k] += xi[channelOffset + src] * grad;
+              dX[i][channelOffset + src] += kernel[k] * grad;
+            }
+          }
+        }
+      }
+    }
+    return dX;
+  }
+
+  zeroGrad() {
+    for (let oc = 0; oc < this.outChannels; oc++) {
+      for (let ic = 0; ic < this.inChannels; ic++) this.dW[oc][ic].fill(0);
+    }
+    this.db.fill(0);
+  }
+
+  gradNorm() {
+    let sum = 0;
+    for (let oc = 0; oc < this.outChannels; oc++) {
+      for (let ic = 0; ic < this.inChannels; ic++) {
+        for (let k = 0; k < this.kernelSize; k++) sum += this.dW[oc][ic][k] ** 2;
+      }
+      sum += this.db[oc] ** 2;
+    }
+    return Math.sqrt(sum);
+  }
+
+  weightNorm() {
+    let sum = 0;
+    for (let oc = 0; oc < this.outChannels; oc++) {
+      for (let ic = 0; ic < this.inChannels; ic++) {
+        for (let k = 0; k < this.kernelSize; k++) sum += this.W[oc][ic][k] ** 2;
+      }
+      sum += this.b[oc] ** 2;
+    }
+    return Math.sqrt(sum);
+  }
+}
+
+function combineDenseLikeNorms(layers, selector) {
+  let sum = 0;
+  for (const layer of layers) {
+    if (!layer) continue;
+    const value = selector(layer);
+    sum += value * value;
+  }
+  return Math.sqrt(sum);
+}
+
+function applyDenseStep(layer, opt, lr, wd, t, beta1, beta2, eps) {
+  for (let i = 0; i < layer.din; i++) {
+    for (let j = 0; j < layer.dout; j++) {
+      let g = layer.dW[i][j];
+      if (opt === 'sgd') {
+        layer.W[i][j] -= lr * (g + wd * layer.W[i][j]);
+      } else if (opt === 'momentum') {
+        layer.mW[i][j] = 0.9 * layer.mW[i][j] + g;
+        layer.W[i][j] -= lr * (layer.mW[i][j] + wd * layer.W[i][j]);
+      } else if (opt === 'rmsprop') {
+        layer.vW[i][j] = 0.9 * layer.vW[i][j] + 0.1 * g * g;
+        layer.W[i][j] -= lr * g / (Math.sqrt(layer.vW[i][j]) + eps) + lr * wd * layer.W[i][j];
+      } else if (opt === 'adam') {
+        if (wd !== 0) g += wd * layer.W[i][j];
+        layer.mW[i][j] = beta1 * layer.mW[i][j] + (1 - beta1) * g;
+        layer.vW[i][j] = beta2 * layer.vW[i][j] + (1 - beta2) * g * g;
+        const mhat = layer.mW[i][j] / (1 - Math.pow(beta1, t));
+        const vhat = layer.vW[i][j] / (1 - Math.pow(beta2, t));
+        layer.W[i][j] -= lr * mhat / (Math.sqrt(vhat) + eps);
+      } else if (opt === 'adamw') {
+        layer.mW[i][j] = beta1 * layer.mW[i][j] + (1 - beta1) * g;
+        layer.vW[i][j] = beta2 * layer.vW[i][j] + (1 - beta2) * g * g;
+        const mhat = layer.mW[i][j] / (1 - Math.pow(beta1, t));
+        const vhat = layer.vW[i][j] / (1 - Math.pow(beta2, t));
+        layer.W[i][j] -= lr * (mhat / (Math.sqrt(vhat) + eps) + wd * layer.W[i][j]);
+      }
+    }
+  }
+  for (let j = 0; j < layer.dout; j++) {
+    const g = layer.db[j];
+    if (opt === 'sgd') {
+      layer.b[j] -= lr * g;
+    } else if (opt === 'momentum') {
+      layer.mb[j] = 0.9 * layer.mb[j] + g;
+      layer.b[j] -= lr * layer.mb[j];
+    } else if (opt === 'rmsprop') {
+      layer.vb[j] = 0.9 * layer.vb[j] + 0.1 * g * g;
+      layer.b[j] -= lr * g / (Math.sqrt(layer.vb[j]) + eps);
+    } else {
+      layer.mb[j] = 0.9 * layer.mb[j] + 0.1 * g;
+      layer.vb[j] = 0.999 * layer.vb[j] + 0.001 * g * g;
+      const mhat = layer.mb[j] / (1 - Math.pow(0.9, t));
+      const vhat = layer.vb[j] / (1 - Math.pow(0.999, t));
+      layer.b[j] -= lr * mhat / (Math.sqrt(vhat) + eps);
+    }
+  }
+}
+
+export class ResidualBlockLayer {
+  constructor(din, units, act = 'relu') {
+    this.type = 'resblock';
+    this.din = din;
+    this.dout = units;
+    this.units = units;
+    this.act = act;
+    this.fc1 = new DenseLayer(din, units, act, false);
+    this.fc2 = new DenseLayer(units, units, 'linear', false);
+    this.shortcut = din === units ? null : new DenseLayer(din, units, 'linear', false);
+  }
+
+  forward(X) {
+    this.X = X;
+    this.hidden = this.fc1.forward(X);
+    this.main = this.fc2.forward(this.hidden);
+    this.skip = this.shortcut ? this.shortcut.forward(X) : X;
+    const batch = X.length;
+    this.pre = Array.from({ length: batch }, () => new Float32Array(this.dout));
+    this.post = Array.from({ length: batch }, () => new Float32Array(this.dout));
+    for (let i = 0; i < batch; i++) {
+      for (let j = 0; j < this.dout; j++) {
+        const value = this.main[i][j] + this.skip[i][j];
+        this.pre[i][j] = value;
+        this.post[i][j] = ACT[this.act].f(value);
+      }
+    }
+    return this.post;
+  }
+
+  backward(dOut) {
+    const batch = dOut.length;
+    const dPre = Array.from({ length: batch }, () => new Float32Array(this.dout));
+    for (let i = 0; i < batch; i++) {
+      for (let j = 0; j < this.dout; j++) {
+        dPre[i][j] = dOut[i][j] * ACT[this.act].df(this.pre[i][j], this.post[i][j]);
+      }
+    }
+    const dHidden = this.fc2.backward(dPre);
+    const dMainInput = this.fc1.backward(dHidden);
+    const dSkipInput = this.shortcut ? this.shortcut.backward(dPre) : dPre;
+    const dX = Array.from({ length: batch }, () => new Float32Array(this.din));
+    for (let i = 0; i < batch; i++) {
+      for (let j = 0; j < this.din; j++) {
+        dX[i][j] = dMainInput[i][j] + (dSkipInput[i][j] ?? 0);
+      }
+    }
+    return dX;
+  }
+
+  zeroGrad() {
+    this.fc1.zeroGrad();
+    this.fc2.zeroGrad();
+    this.shortcut?.zeroGrad();
+  }
+
+  gradNorm() {
+    return combineDenseLikeNorms([this.fc1, this.fc2, this.shortcut], (layer) => layer.gradNorm());
+  }
+
+  weightNorm() {
+    return combineDenseLikeNorms([this.fc1, this.fc2, this.shortcut], (layer) => layer.weightNorm());
+  }
 }
 
 class NormBase {
@@ -540,49 +851,55 @@ export class Network {
     const eps = 1e-8;
     for (const layer of this.layers) {
       if (layer.type === 'dense') {
-        for (let i = 0; i < layer.din; i++) {
-          for (let j = 0; j < layer.dout; j++) {
-            let g = layer.dW[i][j];
-            if (opt === 'sgd') {
-              layer.W[i][j] -= lr * (g + wd * layer.W[i][j]);
-            } else if (opt === 'momentum') {
-              layer.mW[i][j] = 0.9 * layer.mW[i][j] + g;
-              layer.W[i][j] -= lr * (layer.mW[i][j] + wd * layer.W[i][j]);
-            } else if (opt === 'rmsprop') {
-              layer.vW[i][j] = 0.9 * layer.vW[i][j] + 0.1 * g * g;
-              layer.W[i][j] -= lr * g / (Math.sqrt(layer.vW[i][j]) + eps) + lr * wd * layer.W[i][j];
-            } else if (opt === 'adam') {
-              if (wd !== 0) g += wd * layer.W[i][j];
-              layer.mW[i][j] = beta1 * layer.mW[i][j] + (1 - beta1) * g;
-              layer.vW[i][j] = beta2 * layer.vW[i][j] + (1 - beta2) * g * g;
-              const mhat = layer.mW[i][j] / (1 - Math.pow(beta1, this.t));
-              const vhat = layer.vW[i][j] / (1 - Math.pow(beta2, this.t));
-              layer.W[i][j] -= lr * mhat / (Math.sqrt(vhat) + eps);
-            } else if (opt === 'adamw') {
-              layer.mW[i][j] = beta1 * layer.mW[i][j] + (1 - beta1) * g;
-              layer.vW[i][j] = beta2 * layer.vW[i][j] + (1 - beta2) * g * g;
-              const mhat = layer.mW[i][j] / (1 - Math.pow(beta1, this.t));
-              const vhat = layer.vW[i][j] / (1 - Math.pow(beta2, this.t));
-              layer.W[i][j] -= lr * (mhat / (Math.sqrt(vhat) + eps) + wd * layer.W[i][j]);
+        applyDenseStep(layer, opt, lr, wd, this.t, beta1, beta2, eps);
+      } else if (layer.type === 'resblock') {
+        applyDenseStep(layer.fc1, opt, lr, wd, this.t, beta1, beta2, eps);
+        applyDenseStep(layer.fc2, opt, lr, wd, this.t, beta1, beta2, eps);
+        if (layer.shortcut) applyDenseStep(layer.shortcut, opt, lr, wd, this.t, beta1, beta2, eps);
+      } else if (layer.type === 'conv1d') {
+        for (let oc = 0; oc < layer.outChannels; oc++) {
+          for (let ic = 0; ic < layer.inChannels; ic++) {
+            for (let k = 0; k < layer.kernelSize; k++) {
+              let g = layer.dW[oc][ic][k];
+              if (opt === 'sgd') {
+                layer.W[oc][ic][k] -= lr * (g + wd * layer.W[oc][ic][k]);
+              } else if (opt === 'momentum') {
+                layer.mW[oc][ic][k] = 0.9 * layer.mW[oc][ic][k] + g;
+                layer.W[oc][ic][k] -= lr * (layer.mW[oc][ic][k] + wd * layer.W[oc][ic][k]);
+              } else if (opt === 'rmsprop') {
+                layer.vW[oc][ic][k] = 0.9 * layer.vW[oc][ic][k] + 0.1 * g * g;
+                layer.W[oc][ic][k] -= lr * g / (Math.sqrt(layer.vW[oc][ic][k]) + eps) + lr * wd * layer.W[oc][ic][k];
+              } else if (opt === 'adam') {
+                if (wd !== 0) g += wd * layer.W[oc][ic][k];
+                layer.mW[oc][ic][k] = beta1 * layer.mW[oc][ic][k] + (1 - beta1) * g;
+                layer.vW[oc][ic][k] = beta2 * layer.vW[oc][ic][k] + (1 - beta2) * g * g;
+                const mhat = layer.mW[oc][ic][k] / (1 - Math.pow(beta1, this.t));
+                const vhat = layer.vW[oc][ic][k] / (1 - Math.pow(beta2, this.t));
+                layer.W[oc][ic][k] -= lr * mhat / (Math.sqrt(vhat) + eps);
+              } else if (opt === 'adamw') {
+                layer.mW[oc][ic][k] = beta1 * layer.mW[oc][ic][k] + (1 - beta1) * g;
+                layer.vW[oc][ic][k] = beta2 * layer.vW[oc][ic][k] + (1 - beta2) * g * g;
+                const mhat = layer.mW[oc][ic][k] / (1 - Math.pow(beta1, this.t));
+                const vhat = layer.vW[oc][ic][k] / (1 - Math.pow(beta2, this.t));
+                layer.W[oc][ic][k] -= lr * (mhat / (Math.sqrt(vhat) + eps) + wd * layer.W[oc][ic][k]);
+              }
             }
           }
-        }
-        for (let j = 0; j < layer.dout; j++) {
-          const g = layer.db[j];
+          const g = layer.db[oc];
           if (opt === 'sgd') {
-            layer.b[j] -= lr * g;
+            layer.b[oc] -= lr * g;
           } else if (opt === 'momentum') {
-            layer.mb[j] = 0.9 * layer.mb[j] + g;
-            layer.b[j] -= lr * layer.mb[j];
+            layer.mb[oc] = 0.9 * layer.mb[oc] + g;
+            layer.b[oc] -= lr * layer.mb[oc];
           } else if (opt === 'rmsprop') {
-            layer.vb[j] = 0.9 * layer.vb[j] + 0.1 * g * g;
-            layer.b[j] -= lr * g / (Math.sqrt(layer.vb[j]) + eps);
+            layer.vb[oc] = 0.9 * layer.vb[oc] + 0.1 * g * g;
+            layer.b[oc] -= lr * g / (Math.sqrt(layer.vb[oc]) + eps);
           } else {
-            layer.mb[j] = 0.9 * layer.mb[j] + 0.1 * g;
-            layer.vb[j] = 0.999 * layer.vb[j] + 0.001 * g * g;
-            const mhat = layer.mb[j] / (1 - Math.pow(0.9, this.t));
-            const vhat = layer.vb[j] / (1 - Math.pow(0.999, this.t));
-            layer.b[j] -= lr * mhat / (Math.sqrt(vhat) + eps);
+            layer.mb[oc] = 0.9 * layer.mb[oc] + 0.1 * g;
+            layer.vb[oc] = 0.999 * layer.vb[oc] + 0.001 * g * g;
+            const mhat = layer.mb[oc] / (1 - Math.pow(0.9, this.t));
+            const vhat = layer.vb[oc] / (1 - Math.pow(0.999, this.t));
+            layer.b[oc] -= lr * mhat / (Math.sqrt(vhat) + eps);
           }
         }
       } else if (['layernorm', 'batchnorm', 'rmsnorm'].includes(layer.type)) {
@@ -759,6 +1076,43 @@ function genGaussians(n = 240, noise = 0.25) {
   return { X, y, classes: 3 };
 }
 
+function genStripes(n = 240, noise = 0.08) {
+  const X = [];
+  const y = [];
+  for (let i = 0; i < n; i++) {
+    const x0 = (Math.random() - 0.5) * 4;
+    const x1 = (Math.random() - 0.5) * 4;
+    const warped = Math.sin(2.8 * x0) + 0.35 * Math.cos(1.5 * x1);
+    X.push(new Float32Array([
+      x0 + (Math.random() - 0.5) * noise,
+      x1 + (Math.random() - 0.5) * noise,
+    ]));
+    y.push(warped > 0 ? 1 : 0);
+  }
+  return { X, y, classes: 2 };
+}
+
+function genPinwheel(n = 300, noise = 0.16) {
+  const X = [];
+  const y = [];
+  const classes = 3;
+  const per = Math.max(1, Math.floor(n / classes));
+  for (let c = 0; c < classes; c++) {
+    for (let i = 0; i < per; i++) {
+      const r = 0.2 + i / per;
+      const base = (c / classes) * Math.PI * 2;
+      const theta = base + r * 1.8 + randn() * noise * 1.4;
+      const radius = 0.45 + r * 1.4 + randn() * noise * 0.35;
+      X.push(new Float32Array([
+        Math.cos(theta) * radius,
+        Math.sin(theta) * radius,
+      ]));
+      y.push(c);
+    }
+  }
+  return { X, y, classes };
+}
+
 function genSine(n = 200, noise = 0.1) {
   const X = [];
   const y = [];
@@ -792,16 +1146,30 @@ function genSaddle(n = 200, noise = 0.08) {
   return { X, y, classes: 0 };
 }
 
+function genAbsCurve(n = 200, noise = 0.08) {
+  const X = [];
+  const y = [];
+  for (let i = 0; i < n; i++) {
+    const x0 = (Math.random() - 0.5) * 4.4;
+    X.push(new Float32Array([x0]));
+    y.push(0.75 * Math.abs(x0) - 1.1 + randn() * noise);
+  }
+  return { X, y, classes: 0 };
+}
+
 export const DATASETS = {
   circle: { name: 'Circle', fn: genCircle, task: 'binary', Icon: Circle },
   moons: { name: 'Moons', fn: genMoons, task: 'binary', Icon: Waves },
   spiral: { name: 'Spiral', fn: genSpiral, task: 'binary', Icon: Shuffle },
   xor: { name: 'XOR', fn: genXor, task: 'binary', Icon: GitBranch },
   checker: { name: 'Checker', fn: genChecker, task: 'binary', Icon: Grid3x3 },
+  stripes: { name: 'Stripes', fn: genStripes, task: 'binary', Icon: Waves },
   gaussians: { name: '3 Gaussians', fn: genGaussians, task: 'multiclass', Icon: Sparkles },
+  pinwheel: { name: 'Pinwheel', fn: genPinwheel, task: 'multiclass', Icon: Sparkles },
   sine: { name: 'Sine Wave', fn: genSine, task: 'regression', Icon: Activity },
   ripple: { name: 'Noisy Sine', fn: genRipple, task: 'regression', Icon: Sparkles },
   saddle: { name: 'Quadratic Curve', fn: genSaddle, task: 'regression', Icon: TrendingUp },
+  abs: { name: 'Abs Curve', fn: genAbsCurve, task: 'regression', Icon: TrendingUp },
 };
 
 export const DEFAULT_CONFIG = [
@@ -832,15 +1200,27 @@ export function makeGrid(res = GRID_RES, inputDim = 2) {
 export function createNetwork(config, inputDim, outputDim, useFourier, numBands) {
   const layers = [];
   let din = inputDim;
+  let shape = { channels: 1, seqLen: inputDim };
   if (useFourier) {
     const fourier = new FourierFeaturesLayer(inputDim, numBands);
     layers.push(fourier);
     din = fourier.dout;
+    shape = { channels: 1, seqLen: fourier.dout };
   }
   for (const layer of config) {
     if (layer.type === 'dense') {
       layers.push(new DenseLayer(din, layer.units, layer.activation, layer.residual));
       din = layer.units;
+      shape = { channels: 1, seqLen: layer.units };
+    } else if (layer.type === 'resblock') {
+      layers.push(new ResidualBlockLayer(din, layer.units, layer.activation));
+      din = layer.units;
+      shape = { channels: 1, seqLen: layer.units };
+    } else if (layer.type === 'conv1d') {
+      const conv = new Conv1DLayer(shape.channels, shape.seqLen, layer.channels, layer.kernelSize, layer.activation);
+      layers.push(conv);
+      din = conv.dout;
+      shape = { channels: layer.channels, seqLen: shape.seqLen };
     } else if (layer.type === 'dropout') {
       layers.push(new DropoutLayer(layer.rate));
     } else if (layer.type === 'layernorm') {
@@ -858,45 +1238,62 @@ export function createNetwork(config, inputDim, outputDim, useFourier, numBands)
 }
 
 export function exportPyTorch(config, inputDim, task, numClasses, useFourier, numBands, optName, lr, wd) {
-  let code = '# Auto-generated from Neuralab\\nimport torch\\nimport torch.nn as nn\\nimport torch.nn.functional as F\\n\\n';
+  let code = '# Auto-generated from Neuralab\nimport torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n';
   if (useFourier) {
-    code += `class FourierFeatures(nn.Module):\\n    def __init__(self, dim, num_bands=${numBands}):\\n`;
-    code += `        super().__init__(); self.num_bands = num_bands\\n`;
-    code += `        self.register_buffer('freqs', (2 ** torch.arange(num_bands)) * torch.pi)\\n`;
-    code += `    def forward(self, x):\\n        x = x.unsqueeze(-1) * self.freqs\\n`;
-    code += '        return torch.cat([x.sin(), x.cos()], dim=-1).flatten(-2)\\n\\n';
+    code += `class FourierFeatures(nn.Module):\n    def __init__(self, dim, num_bands=${numBands}):\n`;
+    code += '        super().__init__()\n';
+    code += '        self.num_bands = num_bands\n';
+    code += "        self.register_buffer('freqs', (2 ** torch.arange(num_bands)) * torch.pi)\n";
+    code += '    def forward(self, x):\n        x = x.unsqueeze(-1) * self.freqs\n';
+    code += '        return torch.cat([x.sin(), x.cos()], dim=-1).flatten(-2)\n\n';
   }
-  code += 'class Net(nn.Module):\\n    def __init__(self):\\n        super().__init__()\\n';
+  code += 'class Net(nn.Module):\n    def __init__(self):\n        super().__init__()\n';
   let din = inputDim;
+  let shape = { channels: 1, seqLen: inputDim };
   if (useFourier) {
-    code += `        self.fourier = FourierFeatures(${inputDim}, ${numBands})\\n`;
+    code += `        self.fourier = FourierFeatures(${inputDim}, ${numBands})\n`;
     din = inputDim * 2 * numBands;
+    shape = { channels: 1, seqLen: din };
   }
   let denseIdx = 0;
   let auxIdx = 0;
+  let convIdx = 0;
   for (const layer of config) {
     if (layer.type === 'dense') {
-      code += `        self.fc${denseIdx} = nn.Linear(${din}, ${layer.units})\\n`;
+      code += `        self.fc${denseIdx} = nn.Linear(${din}, ${layer.units})\n`;
       din = layer.units;
+      shape = { channels: 1, seqLen: din };
       denseIdx++;
+    } else if (layer.type === 'resblock') {
+      code += `        self.rb${auxIdx}_fc1 = nn.Linear(${din}, ${layer.units})\n`;
+      code += `        self.rb${auxIdx}_fc2 = nn.Linear(${layer.units}, ${layer.units})\n`;
+      if (din !== layer.units) code += `        self.rb${auxIdx}_skip = nn.Linear(${din}, ${layer.units})\n`;
+      din = layer.units;
+      shape = { channels: 1, seqLen: din };
+      auxIdx++;
+    } else if (layer.type === 'conv1d') {
+      code += `        self.conv${convIdx} = nn.Conv1d(${shape.channels}, ${layer.channels}, kernel_size=${layer.kernelSize}, padding=${Math.floor(layer.kernelSize / 2)})\n`;
+      din = shape.seqLen * layer.channels;
+      shape = { channels: layer.channels, seqLen: shape.seqLen };
+      convIdx++;
     } else if (layer.type === 'layernorm') {
-      code += `        self.ln${auxIdx} = nn.LayerNorm(${din})\\n`;
+      code += `        self.ln${auxIdx} = nn.LayerNorm(${din})\n`;
       auxIdx++;
     } else if (layer.type === 'batchnorm') {
-      code += `        self.bn${auxIdx} = nn.BatchNorm1d(${din})\\n`;
+      code += `        self.bn${auxIdx} = nn.BatchNorm1d(${din})\n`;
       auxIdx++;
     } else if (layer.type === 'rmsnorm') {
-      code += `        self.rms${auxIdx} = nn.RMSNorm(${din})\\n`;
+      code += `        self.rms${auxIdx} = nn.RMSNorm(${din})\n`;
       auxIdx++;
     } else if (layer.type === 'dropout') {
-      code += `        self.dp${auxIdx} = nn.Dropout(${layer.rate})\\n`;
+      code += `        self.dp${auxIdx} = nn.Dropout(${layer.rate})\n`;
       auxIdx++;
     }
   }
   const outUnits = task === 'multiclass' ? numClasses : 1;
-  code += `        self.out = nn.Linear(${din}, ${outUnits})\\n\\n`;
-  code += '    def forward(self, x):\\n';
-  if (useFourier) code += '        x = self.fourier(x)\\n';
+  code += `        self.out = nn.Linear(${din}, ${outUnits})\n\n`;
+  code += '    def forward(self, x):\n';
+  if (useFourier) code += '        x = self.fourier(x)\n';
   const actMap = {
     relu: 'F.relu',
     leaky_relu: 'F.leaky_relu',
@@ -909,31 +1306,52 @@ export function exportPyTorch(config, inputDim, task, numClasses, useFourier, nu
   };
   denseIdx = 0;
   auxIdx = 0;
+  convIdx = 0;
+  let forwardDim = useFourier ? inputDim * 2 * numBands : inputDim;
+  let forwardShape = { channels: 1, seqLen: forwardDim };
   for (const layer of config) {
     if (layer.type === 'dense') {
       const act = actMap[layer.activation];
       if (layer.residual) {
-        code += `        h = self.fc${denseIdx}(x); x = ${act ? `${act}(h + x)` : 'h + x'}\\n`;
+        code += `        h = self.fc${denseIdx}(x); x = ${act ? `${act}(h + x)` : 'h + x'}\n`;
       } else {
-        code += `        x = ${act ? `${act}(self.fc${denseIdx}(x))` : `self.fc${denseIdx}(x)`}\\n`;
+        code += `        x = ${act ? `${act}(self.fc${denseIdx}(x))` : `self.fc${denseIdx}(x)`}\n`;
       }
+      forwardDim = layer.units;
+      forwardShape = { channels: 1, seqLen: layer.units };
       denseIdx++;
+    } else if (layer.type === 'resblock') {
+      code += `        h = ${actMap[layer.activation]}(self.rb${auxIdx}_fc1(x))\n`;
+      code += `        h = self.rb${auxIdx}_fc2(h)\n`;
+      code += forwardDim === layer.units ? '        s = x\n' : `        s = self.rb${auxIdx}_skip(x)\n`;
+      code += `        x = ${actMap[layer.activation]}(h + s)\n`;
+      forwardDim = layer.units;
+      forwardShape = { channels: 1, seqLen: layer.units };
+      auxIdx++;
+    } else if (layer.type === 'conv1d') {
+      const act = actMap[layer.activation];
+      code += `        x = x.view(x.shape[0], ${forwardShape.channels}, ${forwardShape.seqLen})\n`;
+      code += `        x = ${act ? `${act}(self.conv${convIdx}(x))` : `self.conv${convIdx}(x)`}\n`;
+      code += '        x = x.flatten(1)\n';
+      forwardDim = forwardShape.seqLen * layer.channels;
+      forwardShape = { channels: layer.channels, seqLen: forwardShape.seqLen };
+      convIdx++;
     } else if (layer.type === 'layernorm') {
-      code += `        x = self.ln${auxIdx}(x)\\n`;
+      code += `        x = self.ln${auxIdx}(x)\n`;
       auxIdx++;
     } else if (layer.type === 'batchnorm') {
-      code += `        x = self.bn${auxIdx}(x)\\n`;
+      code += `        x = self.bn${auxIdx}(x)\n`;
       auxIdx++;
     } else if (layer.type === 'rmsnorm') {
-      code += `        x = self.rms${auxIdx}(x)\\n`;
+      code += `        x = self.rms${auxIdx}(x)\n`;
       auxIdx++;
     } else if (layer.type === 'dropout') {
-      code += `        x = self.dp${auxIdx}(x)\\n`;
+      code += `        x = self.dp${auxIdx}(x)\n`;
       auxIdx++;
     }
   }
-  if (task === 'binary') code += '        return torch.sigmoid(self.out(x))\\n';
-  else code += '        return self.out(x)\\n';
+  if (task === 'binary') code += '        return torch.sigmoid(self.out(x))\n';
+  else code += '        return self.out(x)\n';
 
   const optMap = {
     sgd: 'torch.optim.SGD(model.parameters(), lr=%lr)',
@@ -943,10 +1361,10 @@ export function exportPyTorch(config, inputDim, task, numClasses, useFourier, nu
     adamw: 'torch.optim.AdamW(model.parameters(), lr=%lr, weight_decay=%wd)',
   };
 
-  code += '\\nmodel = Net()\\n';
-  code += `optim = ${optMap[optName].replace('%lr', lr).replace('%wd', wd)}\\n`;
-  if (task === 'binary') code += 'loss_fn = nn.BCELoss()\\n';
-  else if (task === 'multiclass') code += 'loss_fn = nn.CrossEntropyLoss()\\n';
-  else code += 'loss_fn = nn.MSELoss()\\n';
+  code += '\nmodel = Net()\n';
+  code += `optim = ${optMap[optName].replace('%lr', lr).replace('%wd', wd)}\n`;
+  if (task === 'binary') code += 'loss_fn = nn.BCELoss()\n';
+  else if (task === 'multiclass') code += 'loss_fn = nn.CrossEntropyLoss()\n';
+  else code += 'loss_fn = nn.MSELoss()\n';
   return code;
 }

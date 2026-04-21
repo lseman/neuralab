@@ -19,6 +19,8 @@ import {
   Sparkles,
   StepForward,
   Target,
+  TimerReset,
+  Wand2,
   X,
   Zap,
 } from 'lucide-react';
@@ -27,6 +29,7 @@ import {
   ACT_NAMES,
   DATASETS,
   DEFAULT_CONFIG,
+  LAB_PRESETS,
   OPTIMIZER_OPTIONS,
   SCHEDULER_OPTIONS,
   bceLoss,
@@ -43,6 +46,8 @@ import { DatasetThumb, DecisionBoundary, GradFlowBars } from './visuals.jsx';
 const NODE_COLORS = {
   input:     'var(--node-teal)',
   dense:     'var(--node-blue)',
+  conv1d:    'var(--node-green)',
+  resblock:  'var(--node-rose)',
   dropout:   'var(--node-violet)',
   layernorm: 'var(--node-amber)',
   batchnorm: 'var(--node-amber)',
@@ -125,6 +130,89 @@ function CanvasPanel({ icon: Icon, title, right, children }) {
   );
 }
 
+function encodeShareState(payload) {
+  const json = JSON.stringify(payload);
+  const bytes = new TextEncoder().encode(json);
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function decodeShareState(encoded) {
+  const padded = `${encoded}${'='.repeat((4 - encoded.length % 4) % 4)}`;
+  const binary = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function normalizeShareState(candidate) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  if (!DATASETS[candidate.datasetName]) return null;
+  if (!Array.isArray(candidate.config)) return null;
+  const safeConfig = candidate.config.filter((layer) => layer && typeof layer === 'object' && typeof layer.type === 'string');
+  if (!safeConfig.length) return null;
+  return {
+    datasetName: candidate.datasetName,
+    noise: Number.isFinite(candidate.noise) ? Math.max(0, Math.min(0.5, candidate.noise)) : 0.1,
+    numSamples: Number.isFinite(candidate.numSamples) ? Math.max(40, Math.min(400, candidate.numSamples)) : 200,
+    config: safeConfig,
+    useFourier: Boolean(candidate.useFourier),
+    numBands: Number.isFinite(candidate.numBands) ? Math.max(1, Math.min(8, candidate.numBands)) : 4,
+    optimizer: typeof candidate.optimizer === 'string' ? candidate.optimizer : 'adam',
+    baseLr: Number.isFinite(candidate.baseLr) ? candidate.baseLr : 0.03,
+    weightDecay: Number.isFinite(candidate.weightDecay) ? candidate.weightDecay : 0,
+    scheduler: typeof candidate.scheduler === 'string' ? candidate.scheduler : 'const',
+    batchSize: Number.isFinite(candidate.batchSize) ? candidate.batchSize : 32,
+    speed: Number.isFinite(candidate.speed) ? candidate.speed : 1,
+  };
+}
+
+function readShareStateFromUrl() {
+  if (typeof window === 'undefined') return null;
+  const raw = window.location.hash.startsWith('#state=') ? window.location.hash.slice(7) : '';
+  if (!raw) return null;
+  try {
+    return normalizeShareState(decodeShareState(raw));
+  } catch {
+    return null;
+  }
+}
+
+function buildShareUrl(state) {
+  const payload = encodeShareState({ ...state, version: 1 });
+  return `${window.location.origin}${window.location.pathname}#state=${payload}`;
+}
+
+function SnapshotCard({ snapshot, active, onRestore, onCopy }) {
+  return (
+    <div className={`nl-snapshot-card${active ? ' active' : ''}`}>
+      <div className="nl-snapshot-top">
+        <span className="nl-snapshot-name">{snapshot.name}</span>
+        <span className="nl-snapshot-step mono">{snapshot.mode}</span>
+      </div>
+      <div className="nl-snapshot-meta">{snapshot.dataset} · {snapshot.optimizer}</div>
+      <div className="nl-snapshot-grid">
+        <div>
+          <span className="nl-snapshot-key">Layers</span>
+          <span className="nl-snapshot-val mono">{snapshot.layerCount}</span>
+        </div>
+        <div>
+          <span className="nl-snapshot-key">Samples</span>
+          <span className="nl-snapshot-val mono">{snapshot.numSamples}</span>
+        </div>
+      </div>
+      <div className="nl-snapshot-actions">
+        <button type="button" className="nl-btn" onClick={onRestore}>Load</button>
+        <button type="button" className="nl-btn" onClick={onCopy}>
+          <Copy size={12} /> Copy Link
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function activationColor(value, min, max) {
   const range = Math.max(1e-6, max - min);
   const t = (value - min) / range;
@@ -154,6 +242,31 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
           neuronIndices: Array.from({ length: layer.dout }, (_, i) => i),
           layerIndex: index,
           isOutput,
+          skip: Boolean(layer.residual),
+        });
+      } else if (layer.type === 'resblock') {
+        nodes.push({
+          type: 'resblock',
+          count: layer.dout,
+          label: `res · ${layer.act}`,
+          weights: layer.fc1.W,
+          din: layer.din,
+          dout: layer.dout,
+          neuronIndices: Array.from({ length: layer.dout }, (_, i) => i),
+          layerIndex: index,
+          isOutput: false,
+          skip: true,
+        });
+      } else if (layer.type === 'conv1d') {
+        nodes.push({
+          type: 'conv1d',
+          count: layer.outChannels,
+          label: `k${layer.kernelSize}`,
+          din: layer.din,
+          dout: layer.dout,
+          neuronIndices: Array.from({ length: layer.outChannels }, (_, i) => i * layer.seqLen),
+          layerIndex: index,
+          isOutput: false,
         });
       } else if (['layernorm', 'batchnorm', 'rmsnorm', 'dropout', 'fourier'].includes(layer.type)) {
         nodes.push({
@@ -208,6 +321,7 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
 
   const edges = useMemo(() => {
     const nextEdges = [];
+    const skipEdges = [];
     for (let li = 0; li < columns.length - 1; li++) {
       const src = columns[li];
       const dst = columns[li + 1];
@@ -234,8 +348,16 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
           });
         }
       }
+      if (dst.layer.skip) {
+        skipEdges.push({
+          fromX: src.x,
+          toX: dst.x,
+          y: 22,
+          color: dst.layer.type === 'resblock' ? 'rgba(244,63,94,0.74)' : 'rgba(168,85,247,0.72)',
+        });
+      }
     }
-    return nextEdges;
+    return { nextEdges, skipEdges };
   }, [columns]);
 
   const previewData = useMemo(() => {
@@ -285,7 +407,7 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
                 className="nl-network-layer-control"
                 style={{ left: column.x, transform: 'translateX(-50%)' }}
               >
-                {column.layer.type === 'dense' && !column.layer.isOutput ? (
+                {(column.layer.type === 'dense' || column.layer.type === 'resblock') && !column.layer.isOutput ? (
                   <div className="nl-layer-spin">
                     <button
                       type="button"
@@ -307,7 +429,7 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
             ))}
           </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="nl-network-svg" style={{ width, height }}>
-        {edges.map((edge, index) => (
+        {edges.nextEdges.map((edge, index) => (
           <path
             key={index}
             d={`M ${edge.from.cx} ${edge.from.cy} C ${edge.from.cx + (edge.to.cx - edge.from.cx) * 0.42} ${edge.from.cy}, ${edge.to.cx - (edge.to.cx - edge.from.cx) * 0.34} ${edge.to.cy}, ${edge.to.cx} ${edge.to.cy}`}
@@ -316,6 +438,23 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
             strokeLinecap="round"
             fill="none"
           />
+        ))}
+        {edges.skipEdges.map((edge, index) => (
+          <g key={`skip-${index}`}>
+            <path
+              d={`M ${edge.fromX} ${edge.y + 12} C ${edge.fromX} ${edge.y - 8}, ${edge.toX} ${edge.y - 8}, ${edge.toX} ${edge.y + 12}`}
+              stroke={edge.color}
+              strokeWidth="1.6"
+              strokeDasharray="5 4"
+              strokeLinecap="round"
+              fill="none"
+            />
+            <circle cx={edge.fromX} cy={edge.y + 12} r="2.5" fill={edge.color} />
+            <circle cx={edge.toX} cy={edge.y + 12} r="2.5" fill={edge.color} />
+            <text x={(edge.fromX + edge.toX) / 2} y={edge.y - 12} textAnchor="middle" fontSize="9" fill={edge.color} fontFamily="JetBrains Mono">
+              skip
+            </text>
+          </g>
         ))}
         {columns.map((column, ci) => (
           <g key={ci}>
@@ -336,7 +475,13 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
                   height={cardHeight}
                   rx="7"
                   fill="rgba(255,255,255,0.04)"
-                  stroke={column.layer.type === 'output' ? 'rgba(249,115,22,0.65)' : column.layer.type === 'input' ? 'rgba(20,184,166,0.65)' : 'rgba(59,130,246,0.55)'}
+                  stroke={column.layer.type === 'output'
+                    ? 'rgba(249,115,22,0.65)'
+                    : column.layer.type === 'input'
+                      ? 'rgba(20,184,166,0.65)'
+                      : column.layer.type === 'resblock'
+                        ? 'rgba(244,63,94,0.6)'
+                        : 'rgba(59,130,246,0.55)'}
                   strokeWidth="1"
                 />
                 {inputDim === 1 ? (
@@ -399,6 +544,8 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
                 : column.layer.type === 'batchnorm' ? 'BATCH NORM'
                 : column.layer.type === 'rmsnorm' ? 'RMS NORM'
                 : column.layer.type === 'dropout' ? 'DROPOUT'
+                : column.layer.type === 'resblock' ? 'RES BLOCK'
+                : column.layer.type === 'conv1d' ? 'CONV 1D'
                 : column.layer.type === 'fourier' ? 'FOURIER'
                 : column.layer.type.toUpperCase()}
             </text>
@@ -421,24 +568,28 @@ function NetworkDiagram({ network, config, updateLayer, useFourier, numBands, ou
 
 // ── Main app ──────────────────────────────────────────────────────────────
 export default function NeuralabApp() {
-  const [datasetName, setDatasetName] = useState('spiral');
-  const [noise, setNoise] = useState(0.1);
-  const [numSamples, setNumSamples] = useState(200);
-  const [config, setConfig] = useState(DEFAULT_CONFIG);
-  const [useFourier, setUseFourier] = useState(false);
-  const [numBands, setNumBands] = useState(4);
-  const [optimizer, setOptimizer] = useState('adam');
-  const [baseLr, setBaseLr] = useState(0.03);
-  const [weightDecay, setWeightDecay] = useState(0);
-  const [scheduler, setScheduler] = useState('const');
-  const [speed, setSpeed] = useState(1);
-  const [batchSize, setBatchSize] = useState(32);
+  const initialShareState = useMemo(() => readShareStateFromUrl(), []);
+  const [datasetName, setDatasetName] = useState(initialShareState?.datasetName ?? 'spiral');
+  const [noise, setNoise] = useState(initialShareState?.noise ?? 0.1);
+  const [numSamples, setNumSamples] = useState(initialShareState?.numSamples ?? 200);
+  const [config, setConfig] = useState(initialShareState?.config ?? DEFAULT_CONFIG);
+  const [useFourier, setUseFourier] = useState(initialShareState?.useFourier ?? false);
+  const [numBands, setNumBands] = useState(initialShareState?.numBands ?? 4);
+  const [optimizer, setOptimizer] = useState(initialShareState?.optimizer ?? 'adam');
+  const [baseLr, setBaseLr] = useState(initialShareState?.baseLr ?? 0.03);
+  const [weightDecay, setWeightDecay] = useState(initialShareState?.weightDecay ?? 0);
+  const [scheduler, setScheduler] = useState(initialShareState?.scheduler ?? 'const');
+  const [speed, setSpeed] = useState(initialShareState?.speed ?? 1);
+  const [batchSize, setBatchSize] = useState(initialShareState?.batchSize ?? 32);
   const [isRunning, setIsRunning] = useState(false);
   const [step, setStep] = useState(0);
   const [lossHistory, setLossHistory] = useState([]);
   const [metrics, setMetrics] = useState({ loss: 0, testLoss: 0, acc: 0, testAcc: 0, gradNorm: 0, deadFrac: 0 });
   const [tick, setTick] = useState(0);
   const [showCode, setShowCode] = useState(false);
+  const [shareModalUrl, setShareModalUrl] = useState('');
+  const [shareStates, setShareStates] = useState([]);
+  const [lastShareUrl, setLastShareUrl] = useState(initialShareState ? window.location.href : '');
 
   const networkRef = useRef(null);
   const trainDataRef = useRef(null);
@@ -457,6 +608,18 @@ export default function NeuralabApp() {
   const numClasses = task === 'multiclass' ? 3 : 2;
   const outputDim = task === 'multiclass' ? 3 : 1;
   const optimizerMeta = OPTIMIZER_OPTIONS.find(o => o.value === optimizer);
+
+  const recommendation = useMemo(() => {
+    if (task === 'regression') {
+      if (metrics.testLoss > metrics.loss * 1.35 && step > 30) return 'Test error is climbing faster than train. Try dropout, weight decay, or fewer units.';
+      if (metrics.gradNorm < 1e-4 && step > 40) return 'Gradients are very small. A higher learning rate or Fourier features may help.';
+      return 'Regression tasks usually benefit from smooth activations and periodic features.';
+    }
+    if (metrics.testAcc > 0.9) return 'This run is strong. Save it, then increase noise or depth to stress-test it.';
+    if (metrics.deadFrac > 0.25) return 'Many neurons are inactive. Try tanh, SiLU, normalization, or a lower learning rate.';
+    if (metrics.testLoss > metrics.loss + 0.2 && step > 30) return 'The train/test gap is widening. Add dropout, weight decay, or regenerate data.';
+    return 'For harder decision boundaries, try one of the presets or add another dense block.';
+  }, [metrics, step, task]);
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -482,6 +645,10 @@ export default function NeuralabApp() {
       if (!layer) return null;
       const title = layer.type === 'dense'
         ? `Dense · ${layer.units}u`
+        : layer.type === 'resblock'
+          ? `Residual Block · ${layer.units}u`
+        : layer.type === 'conv1d'
+          ? `Conv1D · ${layer.channels}ch`
         : layer.type === 'dropout'
           ? `Dropout · ${layer.rate.toFixed(2)}`
           : layer.type === 'layernorm'
@@ -493,6 +660,10 @@ export default function NeuralabApp() {
                 : layer.type;
       const subtitle = layer.type === 'dense'
         ? `${layer.activation}${layer.residual ? ' • skip' : ''}`
+        : layer.type === 'resblock'
+          ? `${layer.activation} • shortcut`
+        : layer.type === 'conv1d'
+          ? `k${layer.kernelSize} • ${layer.activation}`
         : layer.type === 'dropout'
           ? `rate ${layer.rate.toFixed(2)}`
           : 'normalization';
@@ -665,6 +836,8 @@ export default function NeuralabApp() {
   // ── Layer CRUD ────────────────────────────────────────────────────────────
   const addLayer = type => {
     const layer = type === 'dense' ? { type: 'dense', units: 8, activation: 'relu', residual: false }
+      : type === 'resblock' ? { type: 'resblock', units: 8, activation: 'relu' }
+      : type === 'conv1d' ? { type: 'conv1d', channels: 4, kernelSize: 3, activation: 'relu' }
       : type === 'dropout' ? { type: 'dropout', rate: 0.1 } : { type };
     setConfig(c => [...c, layer]);
   };
@@ -687,6 +860,105 @@ export default function NeuralabApp() {
     () => exportPyTorch(config, inputDim, task, numClasses, useFourier, numBands, optimizer, baseLr, weightDecay),
     [baseLr, config, inputDim, numBands, numClasses, optimizer, task, useFourier, weightDecay],
   );
+
+  const captureShareState = useCallback(() => ({
+    datasetName,
+    noise,
+    numSamples,
+    config,
+    useFourier,
+    numBands,
+    optimizer,
+    baseLr,
+    weightDecay,
+    scheduler,
+    batchSize,
+    speed,
+  }), [baseLr, batchSize, config, datasetName, noise, numBands, numSamples, optimizer, scheduler, speed, useFourier, weightDecay]);
+
+  const applyShareState = useCallback((state) => {
+    setIsRunning(false);
+    runningRef.current = false;
+    setDatasetName(state.datasetName);
+    setNoise(state.noise);
+    setNumSamples(state.numSamples);
+    setConfig(state.config);
+    setUseFourier(state.useFourier);
+    setNumBands(state.numBands);
+    setOptimizer(state.optimizer);
+    setBaseLr(state.baseLr);
+    setWeightDecay(state.weightDecay);
+    setScheduler(state.scheduler);
+    setBatchSize(state.batchSize);
+    setSpeed(state.speed);
+    setSelectedNodeId(null);
+  }, []);
+
+  const applyPreset = useCallback((preset) => {
+    applyShareState({
+      datasetName: preset.dataset,
+      noise: preset.noise,
+      numSamples: preset.numSamples,
+      config: preset.config,
+      useFourier: preset.useFourier,
+      numBands: preset.numBands,
+      optimizer: preset.optimizer,
+      baseLr: preset.baseLr,
+      weightDecay: preset.weightDecay,
+      scheduler: preset.scheduler,
+      batchSize: preset.batchSize,
+      speed: preset.speed,
+    });
+  }, [applyShareState]);
+
+  const copyShareUrl = useCallback(async (url) => {
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      // Ignore clipboard failures; the URL is still visible in the UI.
+    }
+  }, []);
+
+  const openShareModal = useCallback((url) => {
+    setShareModalUrl(url);
+  }, []);
+
+  const saveSnapshot = useCallback(async () => {
+    const state = captureShareState();
+    const url = buildShareUrl(state);
+    const next = {
+      id: `${Date.now()}`,
+      name: `${datasetMeta.name} Share State`,
+      dataset: datasetMeta.name,
+      optimizer,
+      url,
+      state,
+      mode: `${task} · ${useFourier ? `fourier ${numBands}` : 'raw input'}`,
+      layerCount: config.length + 1,
+      numSamples,
+    };
+    window.history.replaceState(null, '', url);
+    setLastShareUrl(url);
+    setShareStates((current) => [next, ...current.filter((item) => item.url !== url)].slice(0, 6));
+    openShareModal(url);
+  }, [captureShareState, config.length, datasetMeta.name, numBands, numSamples, openShareModal, optimizer, task, useFourier]);
+
+  const restoreSnapshot = useCallback((snapshot) => {
+    applyShareState(snapshot.state);
+    window.history.replaceState(null, '', snapshot.url);
+    setLastShareUrl(snapshot.url);
+  }, [applyShareState]);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      const shared = readShareStateFromUrl();
+      if (!shared) return;
+      applyShareState(shared);
+      setLastShareUrl(window.location.href);
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, [applyShareState]);
 
   return (
     <div className="nl-root">
@@ -771,6 +1043,8 @@ export default function NeuralabApp() {
               {config.map((layer, i) => {
                 const id = `layer-${i}`;
                 const title = layer.type === 'dense' ? `Dense · ${layer.units}u`
+                  : layer.type === 'resblock' ? `Residual Block · ${layer.units}u`
+                  : layer.type === 'conv1d' ? `Conv1D · ${layer.channels}ch`
                   : layer.type === 'dropout' ? `Dropout`
                   : layer.type === 'layernorm' ? 'LayerNorm'
                   : layer.type === 'batchnorm' ? 'BatchNorm'
@@ -778,6 +1052,8 @@ export default function NeuralabApp() {
                   : layer.type;
                 const meta = layer.type === 'dense'
                   ? `${layer.activation}${layer.residual ? ' · skip' : ''}`
+                  : layer.type === 'resblock' ? `${layer.activation} · shortcut`
+                  : layer.type === 'conv1d' ? `k${layer.kernelSize} · ${layer.activation}`
                   : layer.type === 'dropout' ? `rate ${layer.rate.toFixed(2)}`
                   : 'norm';
                 const color = NODE_COLORS[layer.type] ?? 'var(--node-blue)';
@@ -844,6 +1120,8 @@ export default function NeuralabApp() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
                 {[
                   ['dense', 'Dense', 'var(--node-blue)'],
+                  ['resblock', 'Residual', 'var(--node-rose)'],
+                  ['conv1d', 'Conv1D', 'var(--node-green)'],
                   ['dropout', 'Dropout', 'var(--node-violet)'],
                   ['layernorm', 'LayerNorm', 'var(--node-amber)'],
                   ['batchnorm', 'BatchNorm', 'var(--node-amber)'],
@@ -886,6 +1164,9 @@ export default function NeuralabApp() {
                 <input className="nl-slider" type="range" min="40" max="400" step="20" value={numSamples}
                   onChange={e => setNumSamples(+e.target.value)} />
               </div>
+            </div>
+            <div className="nl-copy" style={{ marginTop: 10 }}>
+              {datasetMeta.name} is a {task} benchmark. Presets above can jump straight into deeper or more regularized setups.
             </div>
           </Section>
 
@@ -1012,11 +1293,43 @@ export default function NeuralabApp() {
                           onChange={e => updateLayer(selectedNode.layerIndex, { activation: e.target.value })}>
                           {ACT_NAMES.map(a => <option key={a} value={a}>{a}</option>)}
                         </select>
-                        <label className="nl-check">
-                          <input type="checkbox" checked={selectedNode.config.residual}
-                            onChange={e => updateLayer(selectedNode.layerIndex, { residual: e.target.checked })} />
-                          Residual skip
-                        </label>
+                        <div className="nl-copy">Dense is now a plain feed-forward block. Use a Residual Block for first-class shortcut connections.</div>
+                      </>
+                    )}
+                    {selectedNode.nodeType === 'resblock' && (
+                      <>
+                        <div className="nl-row between" style={{ marginBottom: 4 }}>
+                          <span className="nl-label">Units</span>
+                          <span className="nl-value-display">{selectedNode.config.units}</span>
+                        </div>
+                        <input className="nl-slider" type="range" min="1" max="32" value={selectedNode.config.units}
+                          onChange={e => updateLayer(selectedNode.layerIndex, { units: +e.target.value })} />
+                        <select className="nl-select mono" value={selectedNode.config.activation}
+                          onChange={e => updateLayer(selectedNode.layerIndex, { activation: e.target.value })}>
+                          {ACT_NAMES.map(a => <option key={a} value={a}>{a}</option>)}
+                        </select>
+                        <div className="nl-copy">Residual Block uses a transformed path plus a visible shortcut connection. If dimensions differ, the shortcut projects automatically.</div>
+                      </>
+                    )}
+                    {selectedNode.nodeType === 'conv1d' && (
+                      <>
+                        <div className="nl-row between" style={{ marginBottom: 4 }}>
+                          <span className="nl-label">Channels</span>
+                          <span className="nl-value-display">{selectedNode.config.channels}</span>
+                        </div>
+                        <input className="nl-slider" type="range" min="2" max="8" value={selectedNode.config.channels}
+                          onChange={e => updateLayer(selectedNode.layerIndex, { channels: +e.target.value })} />
+                        <div className="nl-row between" style={{ marginBottom: 4 }}>
+                          <span className="nl-label">Kernel</span>
+                          <span className="nl-value-display">{selectedNode.config.kernelSize}</span>
+                        </div>
+                        <input className="nl-slider" type="range" min="1" max="5" step="2" value={selectedNode.config.kernelSize}
+                          onChange={e => updateLayer(selectedNode.layerIndex, { kernelSize: +e.target.value })} />
+                        <select className="nl-select mono" value={selectedNode.config.activation}
+                          onChange={e => updateLayer(selectedNode.layerIndex, { activation: e.target.value })}>
+                          {ACT_NAMES.map(a => <option key={a} value={a}>{a}</option>)}
+                        </select>
+                        <div className="nl-copy">Conv1D shares weights across the current feature axis, then flattens back into the lab pipeline.</div>
                       </>
                     )}
                     {selectedNode.nodeType === 'dropout' && (
@@ -1107,6 +1420,78 @@ export default function NeuralabApp() {
 
       {/* ── CANVAS CENTER ───────────────────────────────────────────────── */}
       <main className="nl-canvas nl-scroll" style={{ overflowY: 'auto', paddingBottom: 36 }}>
+        <section className="nl-hero">
+          <div className="nl-hero-copy">
+            <div className="nl-hero-kicker">interactive neural playground</div>
+            <h1 className="nl-hero-title">Build, tune, compare, and export small networks entirely in the browser.</h1>
+            <p className="nl-hero-text">
+              Guided presets, richer datasets, and shareable save states make Neuralab feel more like a real lab bench.
+            </p>
+          </div>
+          <div className="nl-hero-actions">
+            <button className="nl-btn primary" onClick={() => applyPreset(LAB_PRESETS[0])}>
+              <Wand2 size={13} /> Load Starter
+            </button>
+            <button className="nl-btn" onClick={saveSnapshot}>
+              <TimerReset size={13} /> Save Share Link
+            </button>
+          </div>
+        </section>
+
+        <section className="nl-overview-grid">
+          {[
+            ['Active Dataset', datasetMeta.name, `${task} · ${numSamples} samples`],
+            ['Architecture', `${config.filter(layer => layer.type === 'dense').length + 1} dense stages`, `${totalParams.toLocaleString()} params`],
+            ['Share State', lastShareUrl ? 'ready' : 'unsaved', lastShareUrl ? 'URL updated for this configuration' : 'save to generate a reloadable link'],
+            ['Recommendation', recommendation, optimizerMeta?.detail ?? ''],
+          ].map(([label, value, meta]) => (
+            <div key={label} className="nl-overview-card">
+              <div className="nl-overview-label">{label}</div>
+              <div className="nl-overview-value">{value}</div>
+              <div className="nl-overview-meta">{meta}</div>
+            </div>
+          ))}
+        </section>
+
+        <CanvasPanel
+          icon={Sparkles}
+          title="Presets & Share States"
+          right={<div className="nl-copy mono">{LAB_PRESETS.length} guided starts · {shareStates.length} share links</div>}
+        >
+          <div className="nl-preset-grid">
+            {LAB_PRESETS.map((preset) => (
+              <button key={preset.id} type="button" className="nl-preset-card" onClick={() => applyPreset(preset)}>
+                <div className="nl-preset-title-row">
+                  <span className="nl-preset-title">{preset.name}</span>
+                  <span className="nl-chip blue">{preset.dataset}</span>
+                </div>
+                <div className="nl-preset-copy">{preset.description}</div>
+                <div className="nl-preset-meta mono">
+                  {preset.optimizer} · lr {preset.baseLr.toFixed(3)} · {preset.config.length + 1} layers
+                </div>
+              </button>
+            ))}
+            <div className="nl-snapshot-column">
+              <div className="nl-snapshot-header">
+                <span>Share Links</span>
+                <button className="nl-btn icon" onClick={saveSnapshot} title="Generate share link">
+                  <Plus size={12} />
+                </button>
+              </div>
+              {shareStates.length ? shareStates.map((snapshot) => (
+                <SnapshotCard
+                  key={snapshot.id}
+                  snapshot={snapshot}
+                  active={snapshot.url === lastShareUrl}
+                  onRestore={() => restoreSnapshot(snapshot)}
+                  onCopy={() => openShareModal(snapshot.url)}
+                />
+              )) : (
+                <div className="nl-empty-state">Save a state to generate a shareable URL that reloads this lab setup from the link.</div>
+              )}
+            </div>
+          </div>
+        </CanvasPanel>
 
         {/* Top row: prediction + network graph */}
         <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, flexShrink: 0 }}>
@@ -1224,6 +1609,33 @@ export default function NeuralabApp() {
       </div>
 
       {/* ── CODE EXPORT MODAL ────────────────────────────────────────────── */}
+      {shareModalUrl && (
+        <div className="nl-modal" onClick={() => setShareModalUrl('')}>
+          <div className="nl-modal-card" onClick={e => e.stopPropagation()}>
+            <div className="nl-modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <TimerReset size={15} color="var(--node-teal)" />
+                <span className="nl-modal-title">Share Save State</span>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="nl-btn" onClick={() => copyShareUrl(shareModalUrl)}>
+                  <Copy size={13} /> Copy
+                </button>
+                <button className="nl-btn icon" onClick={() => setShareModalUrl('')}>
+                  <X size={13} />
+                </button>
+              </div>
+            </div>
+            <div className="nl-modal-body nl-scroll">
+              <div className="nl-copy" style={{ marginBottom: 12 }}>
+                Anyone opening this link will reload Neuralab with the same configuration and controls.
+              </div>
+              <pre className="nl-share-link">{shareModalUrl}</pre>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showCode && (
         <div className="nl-modal" onClick={() => setShowCode(false)}>
           <div className="nl-modal-card" onClick={e => e.stopPropagation()}>
