@@ -1438,21 +1438,6 @@ export default function NeuralabApp() {
           </div>
         </section>
 
-        <section className="nl-overview-grid">
-          {[
-            ['Active Dataset', datasetMeta.name, `${task} · ${numSamples} samples`],
-            ['Architecture', `${config.filter(layer => layer.type === 'dense').length + 1} dense stages`, `${totalParams.toLocaleString()} params`],
-            ['Share State', lastShareUrl ? 'ready' : 'unsaved', lastShareUrl ? 'URL updated for this configuration' : 'save to generate a reloadable link'],
-            ['Recommendation', recommendation, optimizerMeta?.detail ?? ''],
-          ].map(([label, value, meta]) => (
-            <div key={label} className="nl-overview-card">
-              <div className="nl-overview-label">{label}</div>
-              <div className="nl-overview-value">{value}</div>
-              <div className="nl-overview-meta">{meta}</div>
-            </div>
-          ))}
-        </section>
-
         <CanvasPanel
           icon={Sparkles}
           title="Presets & Share States"

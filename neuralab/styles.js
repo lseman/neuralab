@@ -338,44 +338,6 @@ body { background: transparent; }
   flex-shrink: 0;
 }
 
-.nl-overview-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin: 12px 0;
-}
-
-.nl-overview-card {
-  padding: 14px;
-  border-radius: 16px;
-  border: 1px solid var(--bd);
-  background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01)), var(--chrome-2);
-  box-shadow: var(--shadow-node);
-  min-height: 112px;
-}
-
-.nl-overview-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--fg-4);
-}
-
-.nl-overview-value {
-  margin-top: 10px;
-  font-size: 21px;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
-  color: var(--fg-0);
-}
-
-.nl-overview-meta {
-  margin-top: 8px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--fg-3);
-}
-
 .nl-preset-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr)) 1.2fr;
